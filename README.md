@@ -27,13 +27,11 @@ STROBE       gate=6
 - Splash screen (RGB565 in PROGMEM) → version card → Pre-Flight page
 - Boot chime (track 1) after initialization completes
 - Pre-Flight displays: Temperature (°C), QNH (hPa), Airfield Elevation (ft), Volume
-- Values shown large (size-2), right-aligned
 
 ### Cruise Mode
 - Compass tape with labels every 45°
 - Heading chevron and tiny degree dot marker
 - Bottom line: speed (kts) left, altitude (ft) right
-- Change-only redraw to avoid flicker
 
 ### Traffic (Alert View)
 - **Top line**: distance (km, 1dp) left · Δalt (ft) centered · bearing (°) right
@@ -41,18 +39,12 @@ STROBE       gate=6
 - **Glider glyph** in center, target dot scaled by range (clamped)
 - **Bearing arrow** slightly outside the ring
 - **Vertical indicator** at right (arrow up/down if |Δalt|>200 ft, dot if level)
-- Change-only redraw to prevent flicker
 
 ### Landing / Landed
 - **Landing**: Large values for Speed (kts) and Altitude (ft)
 - **Landed**: Duration (HH:MM), UTC Time (HH:MM), Alerts (count)
 
 ## Audio System (DFPlayer)
-
-### Audio Cues
-- **Boot** (track 1)
-- **Takeoff** (track 3) 
-- **Landing** (track 7)
 
 ### Spoken Alerts
 Two-part alert system:
@@ -130,44 +122,6 @@ Connect via Serial at **115200 baud**:
 
 ## BLE Control Interface
 
-**Service UUID**: `4fafc201-1fb5-459e-8fcc-c5c9c331914c`
-
-### Characteristics
-
-#### FLASH (Write Only)
-**UUID**: `beb5483e-36e1-4688-b7f5-ea07361b26a8`  
-Short flash of the strobe (diagnostic)
-
-#### TEST (Read/Write)  
-**UUID**: `d7a2d055-5c6a-4b8a-8c0d-2e1e1c6f4b9a`  
-- Write `1` (non-zero): Start scripted bench test (takeoff → L2 → L3 → L1 → landing)
-- Write `0x00`: Stop and return to BOOT
-
-#### VOLUME (Read/Write)
-**UUID**: `f7a2d055-5c6a-4b8a-8c0d-2e1e1c6f4b9b`  
-Accepts ASCII "0..30", 1-byte, or LE uint16. Persists to NVS and applies immediately.
-
-#### ELEVATION (Read/Write)  
-**UUID**: `a8b2d055-5c6a-4b8a-8c0d-2e1e1c6f4b9c`  
-Input in tens-of-feet (Android app format). Controller multiplies by ×10, clamps, persists, echoes stored feet back.
-
-#### QNH (Read/Write)
-**UUID**: `b9c2d055-5c6a-4b8a-8c0d-2e1e1c6f4b9d`  
-Input in hPa/10 (Android app format). Controller multiplies by ×10, clamps (800–1100), persists, echoes stored hPa back.
-
-#### RESET (Write Only)
-**UUID**: `c8b2d055-5c6a-4b8a-8c0d-2e1e1c6f4b9e`  
-Reboots the device
-
-#### DATASOURCE (Read/Write)
-**UUID**: `d8b2d055-5c6a-4b8a-8c0d-2e1e1c6f4b9f`  
-- Byte/ASCII: `0`/FLARM or `1`/SOFTRF
-- Optional second byte = baud index (`0`=19200, `1`=38400)
-- Persists selection and hot-switches UART2 baud
-- Echoes `[source, baudIdx]`
-
-> **Note**: Android can cache GATT. If connection fails after firmware updates, forget the device in Bluetooth settings, toggle BT, or bump the advertised name.
-
 ## Build & Installation
 
 ### Requirements
@@ -217,8 +171,9 @@ src/
 
 ## License
 
-[Add your license information here]
+GNU GENERAL PUBLIC LICENSE
+Version 3, 29 June 2007
 
 ## Contributing
 
-[Add contributing guidelines here]
+Happy for anyone who knows what they are doing to suggest improvements.
