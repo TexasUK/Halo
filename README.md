@@ -122,6 +122,8 @@ Connect via Serial at **115200 baud**:
 
 ## BLE Control Interface
 
+Halo controller app details soon to be released
+
 ## Build & Installation
 
 ### Requirements
