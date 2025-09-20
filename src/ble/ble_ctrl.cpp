@@ -65,43 +65,6 @@ static bool is_ascii_digits(const std::string& s){
   for (char c : s){ if (c<'0'||c>'9') return false; }
   return true;
 }
-static bool parse_u16_any(const std::string& v, uint16_t& out){
-  if (v.empty()) return false;
-
-  // Prefer ASCII if it looks like ASCII digits (common with mobile apps)
-  if (is_ascii_digits(v)) {
-    // std::string isn't null-terminated, so copy
-    char buf[16] = {0};
-    size_t n = min(v.size(), sizeof(buf)-1);
-    memcpy(buf, v.data(), n);
-    unsigned long val = strtoul(buf, nullptr, 10);
-    out = (uint16_t)min(val, 655UL);
-    // allow large inputs but clamp sensibly for QNH/ELEV contexts in caller
-    return true;
-  }
-
-  // If at least 2 bytes, assume little-endian 16-bit
-  if (v.size() >= 2) {
-    out = (uint16_t)((uint8_t)v[0] | ((uint16_t)(uint8_t)v[1] << 8));
-    return true;
-  }
-
-  // If a single byte, use it
-  if (v.size() == 1) {
-    out = (uint16_t)(uint8_t)v[0];
-    return true;
-  }
-
-  return false;
-}
-static bool parse_bool_any(const std::string& v, bool& out){
-  if (v.empty()) return false;
-  if (is_ascii_digits(v)) { out = (v[0] != '0'); return true; }
-  if (v == std::string("FLARM")) { out = false; return true; }
-  if (v == std::string("SOFTRF")) { out = true; return true; }
-  out = ((uint8_t)v[0]) != 0;
-  return true;
-}
 
 // --- Helpers: alert injection + speech ---
 static void injectAlert(int level, float bearing_deg, float relV_m) {
@@ -110,7 +73,6 @@ static void injectAlert(int level, float bearing_deg, float relV_m) {
   alert.since  = millis();
   alert.alarm  = level;
 
-  // Place target ~1km at requested bearing (E=sin, N=cos)
   float rad = bearing_deg * 3.1415926f / 180.0f;
   float dist = 1000.0f;
   alert.relN_m = dist * cosf(rad);
@@ -142,7 +104,6 @@ static void speakVerticalAndClock(int oclock, const char* vert) {
 static void runTestSequence(uint32_t now){
   if (!testActive) return;
   if (lastTestStepTime != 0 && (now - lastTestStepTime < TEST_STEP_MS)) {
-    // keep bench "flying" so auto-landing doesn't steal the show
     extern void app_demo_extend_land_inhibit(uint32_t ms);
     app_demo_extend_land_inhibit(8000);
     return;
@@ -153,35 +114,30 @@ static void runTestSequence(uint32_t now){
   switch (testSequenceStep) {
     case 1:
       dbg("[TEST] Step 1: Takeoff");
-      app_demo_force_flying();  // FSM will chime track 3 on entry
+      app_demo_force_flying();
       break;
-
     case 2:
       dbg("[TEST] Step 2: Alert HIGH @ 2 o'clock");
-      injectAlert(2, 60.0f, +70.0f);    // HIGH ≈ +70 m
+      injectAlert(2, 60.0f, +70.0f);
       speakVerticalAndClock(2, "HIGH");
       break;
-
     case 3:
       dbg("[TEST] Step 3: Alert LOW @ 10 o'clock");
-      injectAlert(3, 300.0f, -70.0f);   // LOW ≈ -70 m
+      injectAlert(3, 300.0f, -70.0f);
       speakVerticalAndClock(10, "LOW");
       break;
-
     case 4:
       dbg("[TEST] Step 4: Alert LEVEL @ 12 o'clock");
       injectAlert(1, 0.0f, 0.0f);
       speakVerticalAndClock(12, "LEVEL");
       break;
-
     case 5:
       dbg("[TEST] Step 5: Landing");
       { extern TrafficAlert alert; alert = {}; }
-      tele.sog_kts = 0.0f;              // allow ST_LANDED gate to complete
-      app_demo_force_landing();         // FSM plays landing chime 7
-      testActive = false;               // stop after one cycle
+      tele.sog_kts = 0.0f;
+      app_demo_force_landing();
+      testActive = false;
       break;
-
     default:
       dbg("[TEST] Looping");
       testSequenceStep = 0;
@@ -193,7 +149,7 @@ static void runTestSequence(uint32_t now){
 static void applyBaudFromIndices() {
   const uint8_t idx = curIsSoftRF ? curBaudIdxSoft : curBaudIdxFlarm;
   const uint32_t baud = (idx == 0) ? 19200UL : 38400UL;
-  halo_apply_nav_baud(baud); // app-level hook reopens UART(2)
+  halo_apply_nav_baud(baud);
   Serial.printf("[BLE] UART set: %s @ %lu\n",
     curIsSoftRF ? "SoftRF" : "FLARM", (unsigned long)baud);
 }
@@ -222,7 +178,6 @@ class MyCharCallbacks : public BLECharacteristicCallbacks {
 
     if (c == pTestCharacteristic) {
       log_payload("TEST write", v);
-      // 0x00 = stop, anything else (or empty) = start+reset.
       bool start = true;
       if (v.size() >= 1 && (uint8_t)v[0] == 0x00) start = false;
 
@@ -232,15 +187,15 @@ class MyCharCallbacks : public BLECharacteristicCallbacks {
         lastTestStepTime = 0;
         Serial.println("[BLE] TEST sequence START");
       } else {
-      testActive = false;
-      Serial.println("[BLE] TEST sequence STOP -> return to BOOT");
-      extern TrafficAlert alert; alert = {};
-      dfp_stop_and_flush();
-      strobeEnable(false);
-      app_fsm_init();       // resets FSM & strobes
-      ui_markAllUndrawn();  // full redraw next frame
-      ui_set_page(PAGE_BOOT);
-    }
+        testActive = false;
+        Serial.println("[BLE] TEST sequence STOP -> return to BOOT");
+        extern TrafficAlert alert; alert = {};
+        dfp_stop_and_flush();
+        strobeEnable(false);
+        app_fsm_init();
+        ui_markAllUndrawn();
+        ui_set_page(PAGE_BOOT);
+      }
       uint8_t state = testActive ? 1 : 0;
       pTestCharacteristic->setValue(&state, 1);
       return;
@@ -248,52 +203,89 @@ class MyCharCallbacks : public BLECharacteristicCallbacks {
 
     if (c == pVolumeCharacteristic) {
       log_payload("VOLUME write", v);
-      uint16_t u16;
-      if (parse_u16_any(v, u16)) {
-        uint8_t vol = (uint8_t)constrain((int)u16, 0, 30);
-        curVolume = vol;
-        halo_set_volume_runtime_and_persist(vol);  // updates df_volume + NVS + live DFPlayer (via main)
-        pVolumeCharacteristic->setValue(&curVolume, 1);
-        Serial.printf("[BLE] VOL=%u (saved)\n", curVolume);
-      } else {
-        Serial.println("[BLE] VOL parse failed");
+      uint16_t u16 = 0;
+      // Accept ASCII "0..30", single byte, or LE u16
+      if (v.size()==1) u16 = (uint8_t)v[0];
+      else if (is_ascii_digits(v)) {
+        char buf[8]={0}; size_t n=min(v.size(), sizeof(buf)-1); memcpy(buf,v.data(),n);
+        u16 = (uint16_t)strtoul(buf,nullptr,10);
+      } else if (v.size()>=2) {
+        u16 = (uint16_t)((uint8_t)v[0] | ((uint16_t)(uint8_t)v[1] << 8));
       }
+      uint8_t vol = (uint8_t)constrain((int)u16, 0, 30);
+      curVolume = vol;
+      halo_set_volume_runtime_and_persist(vol);
+      pVolumeCharacteristic->setValue(&curVolume, 1);
+      Serial.printf("[BLE] VOL=%u (saved)\n", curVolume);
       return;
     }
 
     if (c == pElevationCharacteristic) {
       log_payload("ELEV write", v);
-      uint16_t feet;
-    if (parse_u16_any(v, feet)) {
-      // Android app sends tens-of-feet → convert to feet
-      uint16_t feetScaled = (uint16_t)min(65535, (int)feet * 10);
-      feetScaled = (uint16_t)constrain((int)feetScaled, 0, 30000); // sensible clamp
-      curElevationFeet = feetScaled;
-      halo_set_elev_runtime_and_persist(curElevationFeet);         // runtime + NVS
-      pElevationCharacteristic->setValue((uint8_t*)&feetScaled, 2); // echo back stored value
-      Serial.printf("[BLE] ELEV=%u ft (saved)\n", feetScaled);
-    } else {
-      Serial.println("[BLE] ELEV parse failed");
-    }
+      uint16_t feet = 0;
+
+      if (v.size()==1) {
+        // Single raw byte = tens-of-feet (0x39=57 -> 570 ft)
+        feet = (uint16_t)((uint8_t)v[0]) * 10u;
+      } else if (is_ascii_digits(v)) {
+        // ASCII string: "570" => 570 ft; "57" => 570 ft (treat <400 as tens)
+        char buf[12]={0}; size_t n=min(v.size(), sizeof(buf)-1); memcpy(buf,v.data(),n);
+        unsigned long val = strtoul(buf,nullptr,10);
+        feet = (val < 400) ? (uint16_t)(val * 10u) : (uint16_t)val;
+      } else if (v.size()>=2) {
+        // LE u16: if small, assume tens
+        uint16_t u = (uint16_t)((uint8_t)v[0] | ((uint16_t)(uint8_t)v[1] << 8));
+        feet = (u < 400) ? (uint16_t)(u * 10u) : u;
+      }
+
+      feet = (uint16_t)constrain((int)feet, 0, 30000);
+      curElevationFeet = feet;
+      halo_set_elev_runtime_and_persist(curElevationFeet);
+      pElevationCharacteristic->setValue((uint8_t*)&feet, 2);
+      Serial.printf("[BLE] ELEV=%u ft (saved)\n", feet);
       return;
     }
 
     if (c == pQnhCharacteristic) {
-      log_payload("QNH write", v);
-      uint16_t hpa;
-    if (parse_u16_any(v, hpa)) {
-      // Android app sends hPa/10 → convert to hPa
-      uint16_t hpaScaled = (uint16_t)min(65535, (int)hpa * 10);
-      hpaScaled = (uint16_t)constrain((int)hpaScaled, 800, 1100);  // keep realistic
-      curQnhHpa = hpaScaled;
-      halo_set_qnh_runtime_and_persist(curQnhHpa);                  // runtime + NVS
-      pQnhCharacteristic->setValue((uint8_t*)&hpaScaled, 2);        // echo stored
-      Serial.printf("[BLE] QNH=%u hPa (saved)\n", hpaScaled);
+  log_payload("QNH write", v);
+
+  auto has_dot = [](const std::string& s){ return s.find('.') != std::string::npos; };
+  uint16_t hpa = 1013;
+
+  if (v.size() == 1) {
+    // Slider index: 0..200 => 800..1200 hPa in 2 hPa steps
+    uint8_t idx = (uint8_t)v[0];
+    hpa = (uint16_t)(800 + (uint16_t)idx * 2u);
+    Serial.printf("[BLE] QNH from slider idx=%u -> %u hPa\n", idx, hpa);
+  } else if (is_ascii_digits(v) || has_dot(v)) {
+    // Accept ASCII "1016" (hPa) or "101.6" (×10)
+    char buf[16] = {0};
+    size_t n = min(v.size(), sizeof(buf)-1);
+    memcpy(buf, v.data(), n);
+    if (has_dot(v)) {
+      float f = strtof(buf, nullptr);
+      hpa = (uint16_t)lroundf(f * 10.0f);      // 101.6 -> 1016
     } else {
-      Serial.println("[BLE] QNH parse failed");
+      unsigned long val = strtoul(buf, nullptr, 10);
+      hpa = (uint16_t)val;                      // 1016 -> 1016
     }
-      return;
-    }
+  } else if (v.size() >= 2) {
+    // LE u16 fallback: if it's clearly a slider index (< 400), map it; else assume hPa
+    uint16_t u = (uint16_t)((uint8_t)v[0] | ((uint16_t)(uint8_t)v[1] << 8));
+    hpa = (u < 400) ? (uint16_t)(800 + u * 2u) : u;
+  }
+
+  // Keep within sane range
+  if (hpa < 800) hpa = 800;
+  if (hpa > 1200) hpa = 1200;
+
+  curQnhHpa = hpa;
+  halo_set_qnh_runtime_and_persist(curQnhHpa);          // persists + re-anchors baseline on ground
+  pQnhCharacteristic->setValue((uint8_t*)&hpa, 2);      // echo the stored value
+  Serial.printf("[BLE] QNH=%u hPa (saved)\n", hpa);
+  return;
+}
+
 
     if (c == pResetCharacteristic) {
       Serial.println("[BLE] RESET requested");
@@ -304,13 +296,19 @@ class MyCharCallbacks : public BLECharacteristicCallbacks {
 
     if (c == pDataSourceCharacteristic) {
       log_payload("DATASRC write", v);
-      // Accept ASCII "0/1", "FLARM/SOFTRF", or binary 0x00/0x01; optional second byte/ASCII for baud index (0/1)
-      bool isSoftRF;
-      if (!parse_bool_any(v, isSoftRF)) { isSoftRF = false; }
+      bool isSoftRF = false;
+      // Accept ASCII "0/1", "FLARM/SOFTRF", or binary 0x00/0x01
+      if (!v.empty()) {
+        if (v == std::string("FLARM")) isSoftRF = false;
+        else if (v == std::string("SOFTRF")) isSoftRF = true;
+        else if (v[0] == '0') isSoftRF = false;
+        else if (v[0] == '1') isSoftRF = true;
+        else isSoftRF = ((uint8_t)v[0]) != 0;
+      }
       uint8_t idx = 0;
       if (v.size() >= 2) {
-        // second byte as idx (binary or ASCII digit)
-        if (is_ascii_digits(v.substr(1,1))) idx = (uint8_t)(v[1]-'0');
+        // Second byte (or ASCII digit) as baud index
+        if (v[1] >= '0' && v[1] <= '9') idx = (uint8_t)(v[1]-'0');
         else idx = (uint8_t)v[1];
       }
       if (idx > 1) idx = 1;
@@ -318,7 +316,6 @@ class MyCharCallbacks : public BLECharacteristicCallbacks {
       curIsSoftRF = isSoftRF;
       if (isSoftRF) curBaudIdxSoft = idx; else curBaudIdxFlarm = idx;
 
-      // Persist selection and apply baud via app hook
       halo_set_datasource_and_baud(curIsSoftRF,
         (uint8_t)(curIsSoftRF ? curBaudIdxSoft : curBaudIdxFlarm));
       applyBaudFromIndices();
@@ -383,7 +380,6 @@ static void seedValuesFromRuntime() {
   curElevationFeet  = (uint16_t)max(0.0f, airfieldElev_ft);
   curQnhHpa         = (uint16_t)max(0.0f, qnh_hPa);
 
-  // default mirrors (you can pre-seed from NVS via main before bleInit())
   curIsSoftRF       = false;
   curBaudIdxFlarm   = 0;
   curBaudIdxSoft    = 1;

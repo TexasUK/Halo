@@ -100,6 +100,9 @@ float baselineAlt_m = NAN;
 // Extern for baro math
 float seaLevel_hPa = 1013.25f;
 
+// Plays track 2 once when nav becomes valid
+static bool navWasValid = false;
+
 // ---------------- Strobe ----------------
 struct StrobeCfg { uint16_t on_ms=120, period_ms=2000; } stb;
 static uint32_t strobe_zero_t = 0;
@@ -114,6 +117,17 @@ static void strobeTickSimple(){
   uint32_t phase=(now-strobe_zero_t)%per;
   strobeApply(phase<stb.on_ms);
 }
+
+// Nav-valid chime gating
+static uint32_t lastNavChime_ms = 0;
+static const uint32_t NAV_VALID_CONFIRM_MS   = 1500;  // must be valid this long before chime
+static const uint32_t NAV_REARM_INVALID_MS   = 9000;  // must be invalid this long to rearm (>= FLARM_TIMEOUT_MS)
+static const uint32_t NAV_CHIME_COOLDOWN_MS  = 30000; // min gap between chimes
+
+enum NavEdgeState { NAV_INV=0, NAV_WAIT_VALID, NAV_VALID };
+static NavEdgeState navEdge = NAV_INV;
+static uint32_t     navEdge_t = 0;
+
 
 // ---------------- UI page state ----------------
 static bool pageDrawn[5] = {false,false,false,false,false};
@@ -174,6 +188,29 @@ static void splash_tick(){
   }
 }
 
+// --- FLARM badge (top-right of header) ---
+static bool boot_last_nav_ok = false;
+
+static void drawFlarmBadge(bool ok){
+  const char* label = "FLARM";
+  const int  h  = 14;
+  const int  w  = 6 * 5 + 8;   // 5 chars * 6px + padding
+  const int  x  = tft.width() - w - 4;
+  const int  y  = 2;
+  const uint16_t bg = ok ? COL(32,168,72) : COL(64,64,72);
+  const uint16_t fg = ok ? COL(255,255,255) : COL(200,200,210);
+
+  // background + outline
+  tft.fillRoundRect(x, y, w, h, 3, bg);
+  tft.drawRoundRect(x, y, w, h, 3, fg);
+
+  // text
+  tft.setTextSize(1);
+  tft.setTextColor(fg, bg);
+  tft.setCursor(x + 3, y + 3);
+  tft.print(label);
+}
+
 // ---------------- Header & badges ----------------
 static void drawHeaderStrip(const __FlashStringHelper* title){
   tft.fillRect(0,0,tft.width(),14,COL_HEADER_BG);
@@ -203,6 +240,8 @@ static void drawHeaderBadges(bool flarm_ok){
 static void drawBootStatic(){
   tft.fillScreen(COL_BG);
   drawHeaderStrip(F("Pre-Flight Values"));
+  boot_last_nav_ok = navValid();
+  drawFlarmBadge(boot_last_nav_ok);
 
   const int xLabel = 6;
   const int xValueLeft = 64;          // start of the value column (for cleanup)
@@ -226,6 +265,11 @@ static void updBoot(){
   const int dy = 26;
   const int marginR = 6;
   const int charW = 12;               // 6px base * size 2
+  bool ok = navValid();
+if (ok != boot_last_nav_ok){
+  drawFlarmBadge(ok);
+  boot_last_nav_ok = ok;
+}
   auto printRight = [&](const char* s, int y){
     int x = tft.width() - marginR - (int)strlen(s) * charW;
     if (x < 0) x = 0;
@@ -594,6 +638,23 @@ void halo_set_qnh_runtime_and_persist(uint16_t hpa){
   qnh_hPa = (float)hpa;
   g_cfg.qnh_hPa = qnh_hPa;
   nvs_save_settings(g_cfg);
+
+  // Recompute altitude at the new QNH
+  updateBMP();
+
+  // If not airborne, anchor baseline so AGL ≈ 0 (prevents FSM misfires)
+  extern AppState g_state;
+  bool onGround = (g_state != ST_FLYING && g_state != ST_ALERT && g_state != ST_LANDING);
+  if (onGround && !isnan(tele.alt_m)) {
+    baselineAlt_m = tele.alt_m;
+    baselineSet   = true;
+    g_cfg.baselineAlt_m = baselineAlt_m;
+    g_cfg.baselineSet   = true;
+    nvs_save_settings(g_cfg);
+    Serial.printf("[QNH] baseline anchored to %.2fm (AGL stabilized)\n", baselineAlt_m);
+  }
+
+  // UI will pick up qnh_hPa on the next BOOT tick
 }
 void halo_set_elev_runtime_and_persist(uint16_t feet){
   airfieldElev_ft = (float)feet;
@@ -603,9 +664,23 @@ void halo_set_elev_runtime_and_persist(uint16_t feet){
 void halo_set_datasource_and_baud(bool isSoftRF, uint8_t baudIndex){
   g_cfg.data_source = isSoftRF ? HALO_SRC_SOFTRF : HALO_SRC_FLARM;
   nvs_save_settings(g_cfg);
+
   uint32_t baud = (baudIndex==0) ? 19200u : 38400u;
-  halo_apply_nav_baud(baud);
+  halo_apply_nav_baud(baud);   // re-open UART2
+
+  // Drain any stale bytes and force nav age to "unknown"
+  delay(20);
+  while (FLARM.available()) (void)FLARM.read();
+  tele.last_nmea_ms = 0;
+
+  // Force header redraw so the badge reflects navValid() as soon as frames arrive
+  ui_markAllUndrawn();
+
+  Serial.printf("[NAV] source=%s, baud=%lu (flushed; awaiting fresh NMEA)\n",
+                isSoftRF ? "SoftRF" : "FLARM", (unsigned long)baud);
 }
+
+
 void halo_apply_nav_baud(uint32_t baud){
   g_nav_baud = baud;
   nav_begin(FLARM, FLARM_RX_PIN, g_nav_baud); // re-open Serial2 at new baud
@@ -691,7 +766,47 @@ void loop(){
   // cadence
   if(now-lastSensor>=250){ updateBMP(); lastSensor=now; }
   nav_tick();
-  app_fsm_tick(now);
+
+// Debounced nav-valid chime (track 2)
+bool nv = navValid();
+switch (navEdge) {
+  case NAV_INV:
+    if (nv) { navEdge = NAV_WAIT_VALID; navEdge_t = now; }
+    break;
+
+  case NAV_WAIT_VALID:
+    if (!nv) {
+      navEdge = NAV_INV; // lost it before confirmation window
+    } else if (now - navEdge_t >= NAV_VALID_CONFIRM_MS) {
+      // Confirmed valid long enough; chime if cooldown passed
+      if (now - lastNavChime_ms >= NAV_CHIME_COOLDOWN_MS) {
+        Serial.println("[AUDIO] navValid (debounced) -> track 2");
+        // Optional: skip if audio is already playing
+        // if (digitalRead(DF_BUSY_PIN) == HIGH)  // HIGH = idle on your wiring
+        dfp_play_filename(2);
+        lastNavChime_ms = now;
+      }
+      navEdge = NAV_VALID;
+      navEdge_t = 0;
+    }
+    break;
+
+  case NAV_VALID:
+    if (!nv) {
+      if (navEdge_t == 0) navEdge_t = now;
+      // Only re-arm if we’ve been truly invalid for the full window
+      if (now - navEdge_t >= NAV_REARM_INVALID_MS) {
+        navEdge = NAV_INV; navEdge_t = 0;
+      }
+    } else {
+      navEdge_t = 0; // still valid; keep latch
+    }
+    break;
+}
+
+
+app_fsm_tick(now);
+
 
   // change-only rendering
   if(now-lastUI>=160){
@@ -788,7 +903,9 @@ void loop(){
         app_fsm_init();
         ui_markAllUndrawn();
         ui_set_page(PAGE_BOOT);
+        navWasValid = false;   // <-- so we’ll chime again when nav becomes valid next time
       } break;
+
 
       default:
         Serial.printf("[KEY] unhandled: 0x%02X\n", (unsigned)raw);
