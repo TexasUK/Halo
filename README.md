@@ -35,12 +35,16 @@ STROBE       gate=6
 - Heading chevron and tiny degree dot marker
 - Bottom line: speed (kts) left, altitude (ft) right
 
+![IMG_20250920_131533](https://github.com/user-attachments/assets/2753fdca-f0b5-4439-a155-b0a2bf2d5b2b)
+
 ### Traffic (Alert View)
 - **Top line**: distance (km, 1dp) left · Δalt (ft) centered · bearing (°) right
 - **Ring display**: center tint by alert level (L1 green / L2 amber / L3 red)
 - **Glider glyph** in center, target dot scaled by range (clamped)
 - **Bearing arrow** slightly outside the ring
 - **Vertical indicator** at right (arrow up/down if |Δalt|>200 ft, dot if level)
+- 
+![IMG_20250920_131542](https://github.com/user-attachments/assets/1359676f-4a7d-44f6-9b6b-8163bc064058)
 
 ### Landing / Landed
 - **Landing**: Large values for Speed (kts) and Altitude (ft)
