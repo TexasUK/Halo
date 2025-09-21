@@ -181,5 +181,4 @@
  C:/Users/Texas/.platformio/packages/framework-arduinoespressif32@3.20017.0/cores/esp32/io_pin_remap.h \
  C:/Users/Texas/.platformio/packages/framework-arduinoespressif32@3.20017.0/cores/esp32/Arduino.h \
  src/app/constants.h src/app/telemetry.h src/app/ui_iface.h \
- src/app/../drivers/dfplayer.h src/app/../nav/flarm.h \
- src/app/../storage/nvs_store.h
+ src/nav/flarm.h src/drivers/dfplayer.h src/storage/nvs_store.h

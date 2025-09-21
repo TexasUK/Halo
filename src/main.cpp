@@ -65,6 +65,11 @@ static inline void df_set_volume_immediate(uint8_t vol0_30) {
   df_send_cmd(0x06, vol0_30);  // DFPlayer 'Set Volume' command
 }
 
+// --- Auto-baud recovery after a data-source/baud change ---
+static bool     nav_autobaud_arm = false;
+static uint8_t  nav_last_idx     = 0;
+static uint32_t nav_switch_ms    = 0;
+
 
 // ---------------- Backlight / Colors ----------------
 const int BL_CH=0, BL_FREQ=5000, BL_BITS=8;
@@ -246,15 +251,15 @@ static void drawBootStatic(){
   const int xLabel = 6;
   const int xValueLeft = 64;          // start of the value column (for cleanup)
   const int y0 = 26;
-  const int dy = 26;                   // a bit more spacing for size-2 values
+  const int dy = 26;                   // spacing for size-2 content
 
   tft.setTextColor(COL(170,200,255));
-  tft.setTextSize(1);
+  tft.setTextSize(2);                  // labels now slightly larger
   int y = y0;
-  tft.setCursor(xLabel,y); tft.print(F("Temperature:"));        y += dy;
-  tft.setCursor(xLabel,y); tft.print(F("QNH:"));                y += dy;
-  tft.setCursor(xLabel,y); tft.print(F("Airfield Elev:"));      y += dy;
-  tft.setCursor(xLabel,y); tft.print(F("Volume:"));
+  tft.setCursor(xLabel,y); tft.print(F("Temp"));    y += dy;
+  tft.setCursor(xLabel,y); tft.print(F("QNH"));     y += dy;
+  tft.setCursor(xLabel,y); tft.print(F("Elev"));    y += dy;
+  tft.setCursor(xLabel,y); tft.print(F("Vol"));
 
   // Clear the value column (taller/wider to fit size-2 text)
   tft.fillRect(xValueLeft, y0-4, tft.width()-xValueLeft-6, dy*4+10, COL_BG);
@@ -266,10 +271,10 @@ static void updBoot(){
   const int marginR = 6;
   const int charW = 12;               // 6px base * size 2
   bool ok = navValid();
-if (ok != boot_last_nav_ok){
-  drawFlarmBadge(ok);
-  boot_last_nav_ok = ok;
-}
+  if (ok != boot_last_nav_ok){
+    drawFlarmBadge(ok);
+    boot_last_nav_ok = ok;
+  }
   auto printRight = [&](const char* s, int y){
     int x = tft.width() - marginR - (int)strlen(s) * charW;
     if (x < 0) x = 0;
@@ -278,7 +283,7 @@ if (ok != boot_last_nav_ok){
   };
 
   tft.setTextColor(COL_FG, COL_BG);
-  tft.setTextSize(2);                  // bigger values (labels stay size 1)
+  tft.setTextSize(2);                  // bigger values (labels already size 2)
 
   char buf[24];
   int y = y0;
@@ -299,8 +304,13 @@ if (ok != boot_last_nav_ok){
   snprintf(buf, sizeof(buf), "%dft", (int)lroundf(airfieldElev_ft));
   printRight(buf, y); y += dy;
 
-  // Volume
-  snprintf(buf, sizeof(buf), "%u", (unsigned)df_volume);
+  // Volume — show 0..10 (rounded), display-only
+  {
+    int vol10 = (int)lroundf(df_volume / 3.0f);
+    if (vol10 < 0) vol10 = 0;
+    if (vol10 > 10) vol10 = 10;
+    snprintf(buf, sizeof(buf), "%d", vol10);
+  }
   printRight(buf, y);
 }
 
@@ -461,16 +471,7 @@ static void renderTrafficDynamic(bool force){
     char  distbuf[16]; dtostrf(dist_km, 0, 1, distbuf);
     tft.setCursor(6,18); tft.print(distbuf); tft.print(" km");
 
-    char bbuf[12];
-    int brg = (int)(alert.bearing_deg + 0.5f);
-    snprintf(bbuf, sizeof(bbuf), "%d", brg);
-    int tw_brg = (int)strlen(bbuf) * 6;
-    tft.setCursor(tft.width()-6 - tw_brg - 6, 18);
-    tft.print(bbuf);
-    int16_t bx = tft.getCursorX();
-    int16_t by = tft.getCursorY();
-    tft.fillCircle(bx + 2, by - 6, 2, COL_FG);
-
+    // Center: relative vertical (ft)
     char vbuf[18];
     int dAlt_ft = (int)lroundf(alert.relV_m * 3.28084f);
     snprintf(vbuf, sizeof(vbuf), "dAlt %d ft", dAlt_ft);
@@ -478,6 +479,8 @@ static void renderTrafficDynamic(bool force){
     int x_v  = max(6, (tft.width() - tw_v) / 2);
     tft.setCursor(x_v, 18);
     tft.print(vbuf);
+
+    // Right-hand bearing numeric removed by request; arrow remains the visual indicator.
   }
 
   uint16_t tint = COL_BG;
@@ -662,7 +665,7 @@ void halo_set_elev_runtime_and_persist(uint16_t feet){
   nvs_save_settings(g_cfg);
 }
 void halo_set_datasource_and_baud(bool isSoftRF, uint8_t baudIndex){
-  g_cfg.data_source = isSoftRF ? HALO_SRC_SOFTRF : HALO_SRC_FLARM;
+  g_cfg.data_source = isSoftRF ? HALO_SRC_SOFTRF : HALO_SRC_FLARM;   // enum-safe
   nvs_save_settings(g_cfg);
 
   uint32_t baud = (baudIndex==0) ? 19200u : 38400u;
@@ -672,6 +675,11 @@ void halo_set_datasource_and_baud(bool isSoftRF, uint8_t baudIndex){
   delay(20);
   while (FLARM.available()) (void)FLARM.read();
   tele.last_nmea_ms = 0;
+
+  // Arm auto-baud recovery (try the other baud if no frames arrive)
+  nav_autobaud_arm = true;
+  nav_last_idx     = baudIndex;
+  nav_switch_ms    = millis();
 
   // Force header redraw so the badge reflects navValid() as soon as frames arrive
   ui_markAllUndrawn();
@@ -767,46 +775,54 @@ void loop(){
   if(now-lastSensor>=250){ updateBMP(); lastSensor=now; }
   nav_tick();
 
-// Debounced nav-valid chime (track 2)
-bool nv = navValid();
-switch (navEdge) {
-  case NAV_INV:
-    if (nv) { navEdge = NAV_WAIT_VALID; navEdge_t = now; }
-    break;
+  // Auto-baud recovery: if no valid frames ~3s after the switch, try the other baud
+  if (nav_autobaud_arm && !navValid() && (now - nav_switch_ms) > 3000) {
+    uint8_t altIdx  = (nav_last_idx == 0) ? 1 : 0;
+    uint32_t altBaud = (altIdx == 0) ? 19200u : 38400u;
+    halo_apply_nav_baud(altBaud);
+    nav_autobaud_arm = false;
+    Serial.printf("[NAV] no frames after switch; auto-trying baud idx=%u (%lu)\n",
+                  (unsigned)altIdx, (unsigned long)altBaud);
+  }
 
-  case NAV_WAIT_VALID:
-    if (!nv) {
-      navEdge = NAV_INV; // lost it before confirmation window
-    } else if (now - navEdge_t >= NAV_VALID_CONFIRM_MS) {
-      // Confirmed valid long enough; chime if cooldown passed
-      if (now - lastNavChime_ms >= NAV_CHIME_COOLDOWN_MS) {
-        Serial.println("[AUDIO] navValid (debounced) -> track 2");
-        // Optional: skip if audio is already playing
-        // if (digitalRead(DF_BUSY_PIN) == HIGH)  // HIGH = idle on your wiring
-        dfp_play_filename(2);
-        lastNavChime_ms = now;
+  // Debounced nav-valid chime (track 2)
+  bool nv = navValid();
+  switch (navEdge) {
+    case NAV_INV:
+      if (nv) { navEdge = NAV_WAIT_VALID; navEdge_t = now; }
+      break;
+
+    case NAV_WAIT_VALID:
+      if (!nv) {
+        navEdge = NAV_INV; // lost it before confirmation window
+      } else if (now - navEdge_t >= NAV_VALID_CONFIRM_MS) {
+        // Confirmed valid long enough; chime if cooldown passed
+        if (now - lastNavChime_ms >= NAV_CHIME_COOLDOWN_MS) {
+          Serial.println("[AUDIO] navValid (debounced) -> track 2");
+          // Optional: skip if audio is already playing
+          // if (digitalRead(DF_BUSY_PIN) == HIGH)  // HIGH = idle on your wiring
+          dfp_play_filename(2);
+          lastNavChime_ms = now;
+        }
+        navEdge = NAV_VALID;
+        navEdge_t = 0;
       }
-      navEdge = NAV_VALID;
-      navEdge_t = 0;
-    }
-    break;
+      break;
 
-  case NAV_VALID:
-    if (!nv) {
-      if (navEdge_t == 0) navEdge_t = now;
-      // Only re-arm if we’ve been truly invalid for the full window
-      if (now - navEdge_t >= NAV_REARM_INVALID_MS) {
-        navEdge = NAV_INV; navEdge_t = 0;
+    case NAV_VALID:
+      if (!nv) {
+        if (navEdge_t == 0) navEdge_t = now;
+        // Only re-arm if we’ve been truly invalid for the full window
+        if (now - navEdge_t >= NAV_REARM_INVALID_MS) {
+          navEdge = NAV_INV; navEdge_t = 0;
+        }
+      } else {
+        navEdge_t = 0; // still valid; keep latch
       }
-    } else {
-      navEdge_t = 0; // still valid; keep latch
-    }
-    break;
-}
+      break;
+  }
 
-
-app_fsm_tick(now);
-
+  app_fsm_tick(now);
 
   // change-only rendering
   if(now-lastUI>=160){
@@ -905,7 +921,6 @@ app_fsm_tick(now);
         ui_set_page(PAGE_BOOT);
         navWasValid = false;   // <-- so we’ll chime again when nav becomes valid next time
       } break;
-
 
       default:
         Serial.printf("[KEY] unhandled: 0x%02X\n", (unsigned)raw);

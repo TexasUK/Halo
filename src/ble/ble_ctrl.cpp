@@ -87,10 +87,9 @@ static void injectAlert(int level, float bearing_deg, float relV_m) {
 static void speakVerticalAndClock(int oclock, const char* vert) {
   uint16_t vtrk = 10; // LEVEL
   if (!strcmp(vert,"HIGH")) vtrk = 11;
-  else if (!strcmp(vert,"LOW")) vtrk = 12;
+  else if (!strcmp(vert,"LOW"))  vtrk = 12;
 
-  int oc = oclock;
-  if (oc < 1 || oc > 12) oc = 12;
+  int oc = oclock; if (oc < 1 || oc > 12) oc = 12;
   uint16_t clockTrack = 20 + oc; // 1..12 -> 21..32
 
   dfp_stop_and_flush();
@@ -204,7 +203,6 @@ class MyCharCallbacks : public BLECharacteristicCallbacks {
     if (c == pVolumeCharacteristic) {
       log_payload("VOLUME write", v);
       uint16_t u16 = 0;
-      // Accept ASCII "0..30", single byte, or LE u16
       if (v.size()==1) u16 = (uint8_t)v[0];
       else if (is_ascii_digits(v)) {
         char buf[8]={0}; size_t n=min(v.size(), sizeof(buf)-1); memcpy(buf,v.data(),n);
@@ -228,7 +226,7 @@ class MyCharCallbacks : public BLECharacteristicCallbacks {
         // Single raw byte = tens-of-feet (0x39=57 -> 570 ft)
         feet = (uint16_t)((uint8_t)v[0]) * 10u;
       } else if (is_ascii_digits(v)) {
-        // ASCII string: "570" => 570 ft; "57" => 570 ft (treat <400 as tens)
+        // ASCII "570" => 570 ft; "57" => 570 ft (treat <400 as tens)
         char buf[12]={0}; size_t n=min(v.size(), sizeof(buf)-1); memcpy(buf,v.data(),n);
         unsigned long val = strtoul(buf,nullptr,10);
         feet = (val < 400) ? (uint16_t)(val * 10u) : (uint16_t)val;
@@ -247,45 +245,43 @@ class MyCharCallbacks : public BLECharacteristicCallbacks {
     }
 
     if (c == pQnhCharacteristic) {
-  log_payload("QNH write", v);
+      log_payload("QNH write", v);
+      uint16_t hpa = 1013;
 
-  auto has_dot = [](const std::string& s){ return s.find('.') != std::string::npos; };
-  uint16_t hpa = 1013;
+      auto has_dot = [](const std::string& s){ return s.find('.') != std::string::npos; };
 
-  if (v.size() == 1) {
-    // Slider index: 0..200 => 800..1200 hPa in 2 hPa steps
-    uint8_t idx = (uint8_t)v[0];
-    hpa = (uint16_t)(800 + (uint16_t)idx * 2u);
-    Serial.printf("[BLE] QNH from slider idx=%u -> %u hPa\n", idx, hpa);
-  } else if (is_ascii_digits(v) || has_dot(v)) {
-    // Accept ASCII "1016" (hPa) or "101.6" (×10)
-    char buf[16] = {0};
-    size_t n = min(v.size(), sizeof(buf)-1);
-    memcpy(buf, v.data(), n);
-    if (has_dot(v)) {
-      float f = strtof(buf, nullptr);
-      hpa = (uint16_t)lroundf(f * 10.0f);      // 101.6 -> 1016
-    } else {
-      unsigned long val = strtoul(buf, nullptr, 10);
-      hpa = (uint16_t)val;                      // 1016 -> 1016
+      if (v.size() == 1) {
+        // Slider index: 0..200 => 800..1200 hPa in 2 hPa steps
+        uint8_t idx = (uint8_t)v[0];
+        hpa = (uint16_t)(800 + (uint16_t)idx * 2u);
+        Serial.printf("[BLE] QNH from slider idx=%u -> %u hPa\n", idx, hpa);
+      } else if (is_ascii_digits(v) || has_dot(v)) {
+        // ASCII "1016" (hPa) or "101.6" (×10)
+        char buf[16] = {0};
+        size_t n = min(v.size(), sizeof(buf)-1);
+        memcpy(buf, v.data(), n);
+        if (has_dot(v)) {
+          float f = strtof(buf, nullptr);
+          hpa = (uint16_t)lroundf(f * 10.0f);
+        } else {
+          unsigned long val = strtoul(buf, nullptr, 10);
+          hpa = (uint16_t)val;
+        }
+      } else if (v.size() >= 2) {
+        // LE u16 fallback: if clearly a slider index (< 400), map it; else assume hPa
+        uint16_t u = (uint16_t)((uint8_t)v[0] | ((uint16_t)(uint8_t)v[1] << 8));
+        hpa = (u < 400) ? (uint16_t)(800 + u * 2u) : u;
+      }
+
+      if (hpa < 800) hpa = 800;
+      if (hpa > 1200) hpa = 1200;
+
+      curQnhHpa = hpa;
+      halo_set_qnh_runtime_and_persist(curQnhHpa);
+      pQnhCharacteristic->setValue((uint8_t*)&hpa, 2);
+      Serial.printf("[BLE] QNH=%u hPa (saved)\n", hpa);
+      return;
     }
-  } else if (v.size() >= 2) {
-    // LE u16 fallback: if it's clearly a slider index (< 400), map it; else assume hPa
-    uint16_t u = (uint16_t)((uint8_t)v[0] | ((uint16_t)(uint8_t)v[1] << 8));
-    hpa = (u < 400) ? (uint16_t)(800 + u * 2u) : u;
-  }
-
-  // Keep within sane range
-  if (hpa < 800) hpa = 800;
-  if (hpa > 1200) hpa = 1200;
-
-  curQnhHpa = hpa;
-  halo_set_qnh_runtime_and_persist(curQnhHpa);          // persists + re-anchors baseline on ground
-  pQnhCharacteristic->setValue((uint8_t*)&hpa, 2);      // echo the stored value
-  Serial.printf("[BLE] QNH=%u hPa (saved)\n", hpa);
-  return;
-}
-
 
     if (c == pResetCharacteristic) {
       Serial.println("[BLE] RESET requested");
@@ -296,40 +292,46 @@ class MyCharCallbacks : public BLECharacteristicCallbacks {
 
     if (c == pDataSourceCharacteristic) {
       log_payload("DATASRC write", v);
-      bool isSoftRF = false;
-      // Accept ASCII "0/1", "FLARM/SOFTRF", or binary 0x00/0x01
-      if (!v.empty()) {
-        if (v == std::string("FLARM")) isSoftRF = false;
-        else if (v == std::string("SOFTRF")) isSoftRF = true;
-        else if (v[0] == '0') isSoftRF = false;
-        else if (v[0] == '1') isSoftRF = true;
-        else isSoftRF = ((uint8_t)v[0]) != 0;
-      }
-      uint8_t idx = 0;
-      if (v.size() >= 2) {
-        // Second byte (or ASCII digit) as baud index
-        if (v[1] >= '0' && v[1] <= '9') idx = (uint8_t)(v[1]-'0');
-        else idx = (uint8_t)v[1];
-      }
-      if (idx > 1) idx = 1;
 
-      curIsSoftRF = isSoftRF;
-      if (isSoftRF) curBaudIdxSoft = idx; else curBaudIdxFlarm = idx;
+      // New semantics:
+      //  - 1 byte: treat as *baud index only* for the current source (0=19200,1=38400)
+      //  - ASCII "FLARM"/"SOFTRF": change source, keep current per-source baud
+      //  - 2 bytes: [source, idx] -> explicit source & baud index
+      bool    isSoft = curIsSoftRF;
+      uint8_t idx    = curIsSoftRF ? curBaudIdxSoft : curBaudIdxFlarm;
 
-      halo_set_datasource_and_baud(curIsSoftRF,
-        (uint8_t)(curIsSoftRF ? curBaudIdxSoft : curBaudIdxFlarm));
-      applyBaudFromIndices();
-
-      uint8_t payload[2] = {
-        (uint8_t)(curIsSoftRF ? 1 : 0),
-        (uint8_t)(curIsSoftRF ? curBaudIdxSoft : curBaudIdxFlarm)
+      auto set_and_apply = [&](){
+        curIsSoftRF = isSoft;
+        if (isSoft) curBaudIdxSoft = idx; else curBaudIdxFlarm = idx;
+        halo_set_datasource_and_baud(curIsSoftRF, isSoft ? curBaudIdxSoft : curBaudIdxFlarm);
+        applyBaudFromIndices();
+        uint8_t payload[2] = { (uint8_t)(curIsSoftRF ? 1 : 0),
+                               (uint8_t)(curIsSoftRF ? curBaudIdxSoft : curBaudIdxFlarm) };
+        pDataSourceCharacteristic->setValue(payload, 2);
+        Serial.printf("[BLE] DS=%s idx=%u (saved)\n", curIsSoftRF?"SoftRF":"FLARM", (unsigned)payload[1]);
       };
-      pDataSourceCharacteristic->setValue(payload, 2);
-      Serial.printf("[BLE] DS=%s, idx=%u (saved)\n",
-        curIsSoftRF ? "SoftRF" : "FLARM", (unsigned)payload[1]);
+
+      // CASE 1: explicit strings switch source
+      if (v == std::string("FLARM"))  { isSoft = false; set_and_apply(); return; }
+      if (v == std::string("SOFTRF")) { isSoft = true;  set_and_apply(); return; }
+
+      // CASE 2: two bytes -> [source, idx]
+      if (v.size() >= 2) {
+        isSoft = ((uint8_t)v[0]) != 0;
+        uint8_t b = (uint8_t)v[1];
+        idx = (b > 1) ? 1 : b;
+        set_and_apply(); return;
+      }
+
+      // CASE 3: one byte -> *baud index only* for current source
+      if (v.size() == 1) {
+        uint8_t b = (v[0] >= '0' && v[0] <= '9') ? (uint8_t)(v[0]-'0') : (uint8_t)v[0];
+        idx = (b > 1) ? 1 : b;
+        set_and_apply(); return;
+      }
       return;
     }
-  }
+  } // onWrite
 
   void onRead(BLECharacteristic* c) override {
     if (c == pTestCharacteristic) {
@@ -349,7 +351,7 @@ class MyCharCallbacks : public BLECharacteristicCallbacks {
       c->setValue(payload, 2);
     }
   }
-}; // close class
+}; // class MyCharCallbacks
 
 static BLECharacteristic* mkChar(BLEService* s, const char* uuid, uint32_t props) {
   BLECharacteristic* c = s->createCharacteristic(uuid, props);
@@ -380,9 +382,10 @@ static void seedValuesFromRuntime() {
   curElevationFeet  = (uint16_t)max(0.0f, airfieldElev_ft);
   curQnhHpa         = (uint16_t)max(0.0f, qnh_hPa);
 
+  // Defaults (can be overwritten by NVS restore in main before bleInit())
   curIsSoftRF       = false;
-  curBaudIdxFlarm   = 0;
-  curBaudIdxSoft    = 1;
+  curBaudIdxFlarm   = 0; // 19200
+  curBaudIdxSoft    = 1; // 38400
 
   pVolumeCharacteristic->setValue(&curVolume, 1);
   pElevationCharacteristic->setValue((uint8_t*)&curElevationFeet, 2);
