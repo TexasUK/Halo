@@ -26,13 +26,13 @@ STROBE       gate=6
 ## Features
 
 ### Boot & Pre-Flight
-- Splash screen (RGB565 in PROGMEM) → version card → Pre-Flight page
-- Boot chime (track 1) after initialization completes
+- Splash screen, version card → Pre-Flight page
+- Boot chime after initialization completes
 - Pre-Flight displays: Temperature (°C), QNH (hPa), Airfield Elevation (ft), Volume
 
 ### Cruise Mode
 - Compass tape with labels every 45°
-- Heading chevron and tiny degree dot marker
+- Heading chevron
 - Bottom line: speed (kts) left, altitude (ft) right
 
 ![IMG_20250920_131533](https://github.com/user-attachments/assets/2753fdca-f0b5-4439-a155-b0a2bf2d5b2b)
@@ -54,8 +54,8 @@ STROBE       gate=6
 
 ### Spoken Alerts
 Two-part alert system:
-- **Vertical**: 10=LEVEL, 11=HIGH, 12=LOW
-- **Clock position**: 21..32 for 1..12 o'clock
+- **Vertical**: LEVEL, HIGH, LOW
+- **Clock position**: 1..12 o'clock
 
 ## Strobe Control
 
