@@ -11,7 +11,8 @@
 - **Navigation Input**: FLARM / SoftRF (UART RX)
 - **Lighting**: Strobe MOSFET (digital out)
 
-![IMG_20250920_131226](https://github.com/user-attachments/assets/839cd77a-67d7-476b-8b7b-fd425f63677d)
+![IMG_20251004_180623](https://github.com/user-attachments/assets/54284cbb-9e4b-423d-9233-fa50b9d9eec9)
+
 
 ### Pin Map (Current Build)
 
