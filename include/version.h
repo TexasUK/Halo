@@ -1,11 +1,11 @@
 #pragma once
 
 #define APP_NAME            "HALO Strobe Controller"
-#define APP_VERSION         "0.4.2"
+#define APP_VERSION         "0.4.3"
 
 #define APP_VER_MAJOR       0
 #define APP_VER_MINOR       4
-#define APP_VER_PATCH       2
+#define APP_VER_PATCH       3
 
 #ifndef APP_GIT_HASH
   #define APP_GIT_HASH      "nogit"

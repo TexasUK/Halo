@@ -6,6 +6,7 @@
 #include <Adafruit_BMP280.h>
 #include <pgmspace.h>
 #include <ctype.h>
+#include <math.h>
 
 #include "version.h"
 #include "splash_image.h"
@@ -48,21 +49,19 @@ HardwareSerial   FLARM(2);
 
 // --- DFPlayer raw command helpers (no re-init needed) ---
 static void df_send_cmd(uint8_t cmd, uint16_t param) {
-  // DFPlayer 10-byte frame: 7E FF 06 <cmd> 00 <hi> <lo> <chkH> <chkL> EF
   uint8_t buf[10];
   buf[0]=0x7E; buf[1]=0xFF; buf[2]=0x06; buf[3]=cmd; buf[4]=0x00;
   buf[5]=(uint8_t)(param >> 8); buf[6]=(uint8_t)(param & 0xFF);
   uint16_t sum = 0;
   for (int i=1; i<=6; ++i) sum += buf[i];
-  uint16_t chk = 0xFFFF - sum + 1;  // two's complement
+  uint16_t chk = 0xFFFF - sum + 1;
   buf[7]=(uint8_t)(chk >> 8); buf[8]=(uint8_t)(chk & 0xFF); buf[9]=0xEF;
   DFSerial.write(buf, sizeof(buf));
   DFSerial.flush();
 }
-
 static inline void df_set_volume_immediate(uint8_t vol0_30) {
   if (vol0_30 > 30) vol0_30 = 30;
-  df_send_cmd(0x06, vol0_30);  // DFPlayer 'Set Volume' command
+  df_send_cmd(0x06, vol0_30);
 }
 
 // --- Auto-baud recovery after a data-source/baud change ---
@@ -70,6 +69,9 @@ static bool     nav_autobaud_arm = false;
 static uint8_t  nav_last_idx     = 0;
 static uint32_t nav_switch_ms    = 0;
 
+// *** NEW *** — Boot baseline auto-anchoring gate
+static bool     bootBaselineDone     = false;
+static uint32_t bootBaselineDeadline = 0;
 
 // ---------------- Backlight / Colors ----------------
 const int BL_CH=0, BL_FREQ=5000, BL_BITS=8;
@@ -126,13 +128,12 @@ static void strobeTickSimple(){
 // Nav-valid chime gating
 static uint32_t lastNavChime_ms = 0;
 static const uint32_t NAV_VALID_CONFIRM_MS   = 1500;  // must be valid this long before chime
-static const uint32_t NAV_REARM_INVALID_MS   = 9000;  // must be invalid this long to rearm (>= FLARM_TIMEOUT_MS)
+static const uint32_t NAV_REARM_INVALID_MS   = 9000;  // must be invalid this long to rearm
 static const uint32_t NAV_CHIME_COOLDOWN_MS  = 30000; // min gap between chimes
 
 enum NavEdgeState { NAV_INV=0, NAV_WAIT_VALID, NAV_VALID };
 static NavEdgeState navEdge = NAV_INV;
 static uint32_t     navEdge_t = 0;
-
 
 // ---------------- UI page state ----------------
 static bool pageDrawn[5] = {false,false,false,false,false};
@@ -205,11 +206,9 @@ static void drawFlarmBadge(bool ok){
   const uint16_t bg = ok ? COL(32,168,72) : COL(64,64,72);
   const uint16_t fg = ok ? COL(255,255,255) : COL(200,200,210);
 
-  // background + outline
   tft.fillRoundRect(x, y, w, h, 3, bg);
   tft.drawRoundRect(x, y, w, h, 3, fg);
 
-  // text
   tft.setTextSize(1);
   tft.setTextColor(fg, bg);
   tft.setCursor(x + 3, y + 3);
@@ -239,8 +238,8 @@ static void drawHeaderBadges(bool flarm_ok){
   drawBadgeHeader(bxF, by, wF, h, "FLARM", flarm_ok);
 }
 
-// ---------------- BOOT ----------------
-// --- BOOT (bigger value font, right-aligned) ---
+// ---------------- BOOT (pre-flight) ----------------
+static bool boot_last_nav_ok2 = false;
 
 static void drawBootStatic(){
   tft.fillScreen(COL_BG);
@@ -249,19 +248,18 @@ static void drawBootStatic(){
   drawFlarmBadge(boot_last_nav_ok);
 
   const int xLabel = 6;
-  const int xValueLeft = 64;          // start of the value column (for cleanup)
+  const int xValueLeft = 64;
   const int y0 = 26;
-  const int dy = 26;                   // spacing for size-2 content
+  const int dy = 26;
 
   tft.setTextColor(COL(170,200,255));
-  tft.setTextSize(2);                  // labels now slightly larger
+  tft.setTextSize(2);                  // labels size up
   int y = y0;
   tft.setCursor(xLabel,y); tft.print(F("Temp"));    y += dy;
   tft.setCursor(xLabel,y); tft.print(F("QNH"));     y += dy;
-  tft.setCursor(xLabel,y); tft.print(F("Elev"));    y += dy;
+  tft.setCursor(xLabel,y); tft.print(F("FElev"));  y += dy;
   tft.setCursor(xLabel,y); tft.print(F("Vol"));
 
-  // Clear the value column (taller/wider to fit size-2 text)
   tft.fillRect(xValueLeft, y0-4, tft.width()-xValueLeft-6, dy*4+10, COL_BG);
 }
 
@@ -283,7 +281,7 @@ static void updBoot(){
   };
 
   tft.setTextColor(COL_FG, COL_BG);
-  tft.setTextSize(2);                  // bigger values (labels already size 2)
+  tft.setTextSize(2);
 
   char buf[24];
   int y = y0;
@@ -296,7 +294,7 @@ static void updBoot(){
   }
   printRight(buf, y); y += dy;
 
-  // QNH (no space so it fits neatly)
+  // QNH
   snprintf(buf, sizeof(buf), "%dhPa", (int)lroundf(qnh_hPa));
   printRight(buf, y); y += dy;
 
@@ -304,7 +302,7 @@ static void updBoot(){
   snprintf(buf, sizeof(buf), "%dft", (int)lroundf(airfieldElev_ft));
   printRight(buf, y); y += dy;
 
-  // Volume — show 0..10 (rounded), display-only
+  // Volume display 0..10
   {
     int vol10 = (int)lroundf(df_volume / 3.0f);
     if (vol10 < 0) vol10 = 0;
@@ -313,7 +311,6 @@ static void updBoot(){
   }
   printRight(buf, y);
 }
-
 
 // ---------------- Compass helpers ----------------
 static int norm360(int a){ a%=360; if(a<0) a+=360; return a; }
@@ -391,7 +388,7 @@ static void updCruise(){
   int tw=strlen(buf)*12; tft.setCursor(tft.width()-6-tw,yText); tft.print(buf);
 }
 
-// ---------------- Traffic helpers + renderer ----------------
+// ---------------- Traffic (bearing number removed) ----------------
 static void drawGliderGlyph(int cx, int cy, uint16_t col) {
   tft.drawFastVLine(cx, cy-6, 12, col);
   tft.drawFastHLine(cx-10, cy, 20, col);
@@ -614,10 +611,8 @@ static void updateBMP(){
   float pPa=bmp.readPressure();
   if(!isnan(tC) && !isnan(pPa)){
     tele.tC=tC; tele.p_hPa=pPa/100.0f; tele.alt_m=bmp.readAltitude(seaLevel);
-    if(!baselineSet && !isnan(tele.alt_m)){
-      baselineAlt_m=tele.alt_m; baselineSet=true;
-      Serial.print(F("[BMP] baseline alt m=")); Serial.println(baselineAlt_m,1);
-    }
+
+    // Initial baseline capture was moved to boot auto-anchor logic.
   }
   uint32_t now=millis();
   static float lastAlt = NAN; static uint32_t lastAltT=0;
@@ -633,7 +628,6 @@ void halo_set_volume_runtime_and_persist(uint8_t vol0_30){
   g_cfg.volume0_30 = df_volume;
   nvs_save_settings(g_cfg);
 
-  // Light-weight: set volume directly (no dfp_begin reboot).
   df_set_volume_immediate(df_volume);
   Serial.printf("[AUDIO] volume now %u (persisted)\n", (unsigned)df_volume);
 }
@@ -655,6 +649,9 @@ void halo_set_qnh_runtime_and_persist(uint16_t hpa){
     g_cfg.baselineSet   = true;
     nvs_save_settings(g_cfg);
     Serial.printf("[QNH] baseline anchored to %.2fm (AGL stabilized)\n", baselineAlt_m);
+
+    // *** NEW *** arm AGL fallback takeoff after a ground QNH adjust
+    app_preflight_mark_baseline_ok();
   }
 
   // UI will pick up qnh_hPa on the next BOOT tick
@@ -681,13 +678,11 @@ void halo_set_datasource_and_baud(bool isSoftRF, uint8_t baudIndex){
   nav_last_idx     = baudIndex;
   nav_switch_ms    = millis();
 
-  // Force header redraw so the badge reflects navValid() as soon as frames arrive
   ui_markAllUndrawn();
 
   Serial.printf("[NAV] source=%s, baud=%lu (flushed; awaiting fresh NMEA)\n",
                 isSoftRF ? "SoftRF" : "FLARM", (unsigned long)baud);
 }
-
 
 void halo_apply_nav_baud(uint32_t baud){
   g_nav_baud = baud;
@@ -756,15 +751,19 @@ void loop(){
       bootShownSince_ms = millis();
       Serial.println("[BOOT] init complete");
 
-      // Give the DFPlayer a beat to wake, then push saved volume explicitly.
+      // DF volume to saved level, then boot chime
       delay(200);
       df_set_volume_immediate(df_volume);
       delay(40);
-
       dfp_stop_and_flush();
-      dfp_play_filename(1);        // boot chime (now at saved volume)
+      dfp_play_filename(1);
+
       trafLast = {false,0,NAN,NAN,NAN,0};
-      bleInit();                   // BLE after init
+      bleInit();
+
+      // *** NEW *** schedule boot auto-anchor if nav is invalid initially
+      bootBaselineDone     = false;
+      bootBaselineDeadline = millis() + 10000; // ~10 s after init
     }
     strobeTickSimple();
     dfp_tick();
@@ -774,6 +773,24 @@ void loop(){
   // cadence
   if(now-lastSensor>=250){ updateBMP(); lastSensor=now; }
   nav_tick();
+
+  // *** NEW *** Boot auto-anchoring of baseline (prevents false takeoff at power-up)
+  if (!bootBaselineDone && g_state == ST_PREFLIGHT) {
+    if ((int32_t)(now - bootBaselineDeadline) >= 0        // past delay
+        && !navValid()                                    // only when nav is invalid
+        && !isnan(tele.alt_m)
+        && (isnan(tele.sog_kts) || tele.sog_kts < 2.0f)   // not moving
+        && fabsf(tele.vs_ms) < 0.25f) {                   // fairly steady
+      baselineAlt_m = tele.alt_m;
+      baselineSet   = true;
+      g_cfg.baselineAlt_m = baselineAlt_m;
+      g_cfg.baselineSet   = true;
+      nvs_save_settings(g_cfg);
+      app_preflight_mark_baseline_ok();                   // arm fallback path
+      bootBaselineDone = true;
+      Serial.printf("[QNH] auto-anchored baseline at boot: %.2fm (AGL zeroed)\n", baselineAlt_m);
+    }
+  }
 
   // Auto-baud recovery: if no valid frames ~3s after the switch, try the other baud
   if (nav_autobaud_arm && !navValid() && (now - nav_switch_ms) > 3000) {
@@ -791,16 +808,12 @@ void loop(){
     case NAV_INV:
       if (nv) { navEdge = NAV_WAIT_VALID; navEdge_t = now; }
       break;
-
     case NAV_WAIT_VALID:
       if (!nv) {
-        navEdge = NAV_INV; // lost it before confirmation window
+        navEdge = NAV_INV;
       } else if (now - navEdge_t >= NAV_VALID_CONFIRM_MS) {
-        // Confirmed valid long enough; chime if cooldown passed
         if (now - lastNavChime_ms >= NAV_CHIME_COOLDOWN_MS) {
           Serial.println("[AUDIO] navValid (debounced) -> track 2");
-          // Optional: skip if audio is already playing
-          // if (digitalRead(DF_BUSY_PIN) == HIGH)  // HIGH = idle on your wiring
           dfp_play_filename(2);
           lastNavChime_ms = now;
         }
@@ -808,16 +821,14 @@ void loop(){
         navEdge_t = 0;
       }
       break;
-
     case NAV_VALID:
       if (!nv) {
         if (navEdge_t == 0) navEdge_t = now;
-        // Only re-arm if we’ve been truly invalid for the full window
         if (now - navEdge_t >= NAV_REARM_INVALID_MS) {
           navEdge = NAV_INV; navEdge_t = 0;
         }
       } else {
-        navEdge_t = 0; // still valid; keep latch
+        navEdge_t = 0;
       }
       break;
   }
@@ -833,7 +844,6 @@ void loop(){
     lastUI=now;
   }
 
-  // dfplayer/strobe/ble
   dfp_tick();
   strobeTickSimple();
   bleTick(now);
@@ -859,7 +869,7 @@ void loop(){
         Serial.println("[KEY] T -> DEMO: force FLYING");
         tele.sog_kts   = 25.0f;
         tele.track_deg = 0.0f;
-        app_demo_force_flying();    // FSM path so alerts change strobe cadence
+        app_demo_force_flying();
       } break;
 
       case 'L': {
@@ -889,7 +899,6 @@ void loop(){
         alert.since  = millis();
         alert.alarm  = lvl;
 
-        // 60° absolute bearing -> sector 2 (2 o’clock)
         alert.relN_m = 500;
         alert.relE_m = 866;
         alert.relV_m = (lvl==1 ? 0 : (lvl==2 ? +70 : -70));
@@ -919,7 +928,11 @@ void loop(){
         app_fsm_init();
         ui_markAllUndrawn();
         ui_set_page(PAGE_BOOT);
-        navWasValid = false;   // <-- so we’ll chime again when nav becomes valid next time
+        navWasValid = false;   // so we’ll chime again when nav becomes valid next time
+
+        // *** NEW *** also reset auto-anchor so we can zero AGL again if needed
+        bootBaselineDone     = false;
+        bootBaselineDeadline = millis() + 10000;
       } break;
 
       default:

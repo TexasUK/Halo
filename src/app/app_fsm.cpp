@@ -47,12 +47,17 @@ static uint32_t lastAlertStamp   = 0;  // de-dupe alert entries
 // Require a real climb before landing is allowed
 static bool  landing_armed = false;
 
+// NEW: allow AGL fallback takeoff only after we’ve anchored baseline this boot (or QNH adjust on ground)
+static bool  preflight_baseline_ok = false;
+
 // ---- Helpers ----
 static inline float ft_from_m(float m){ return m * 3.28084f; }
 static inline float agl_ft(){
   if(!baselineSet || isnan(tele.alt_m)) return NAN;
   return ft_from_m(tele.alt_m - baselineAlt_m);
 }
+static inline void strobe_std();
+static inline void strobe_alert_level(int lvl);
 
 // ---- Strobe cadence management ----
 static const uint16_t STROBE_STD_ON_MS  = STROBE_ON_MS; // from constants.h
@@ -77,6 +82,12 @@ static inline void strobe_alert_level(int lvl){
                 lvl, (unsigned)STROBE_STD_ON_MS, (unsigned)per);
 }
 
+// NEW: baseline gate API
+void app_preflight_mark_baseline_ok(){
+  preflight_baseline_ok = true;
+  Serial.println("[FSM] preflight baseline OK -> AGL fallback takeoff armed");
+}
+
 void app_fsm_init(){
   g_state = ST_PREFLIGHT;
   ui_set_page(PAGE_BOOT);
@@ -91,6 +102,7 @@ void app_fsm_init(){
   lastFlightDur_ms = 0;
   flightAlertCount = 0;
   landing_armed    = false;
+  preflight_baseline_ok = false;  // will be raised by main.cpp once we auto-anchor (or QNH set on ground)
 
   strobeEnable(false);            // on ground, no strobes
   strobe_std();                   // reset cadence baseline
@@ -149,7 +161,7 @@ void app_fsm_tick(uint32_t now){
           strobeEnable(true);
           strobe_std();                     // standard cadence on departure
           dfp_play_filename(3);             // Takeoff
-          ui_set_page(PAGE_COMPASS);        // we use PAGE_COMPASS for “Cruise” UI
+          ui_set_page(PAGE_COMPASS);        // “Cruise”
           flightStart_ms   = now;
           flightAlertCount = 0;
           landing_armed    = false;         // not armed yet
@@ -157,8 +169,8 @@ void app_fsm_tick(uint32_t now){
         }
       } else ktsHiStart_ms = 0;
 
-      // Fallback takeoff: AGL high (if nav not valid)
-      if (!nav_ok && !isnan(agl) && agl > TAKEOFF_ALT_FT) {
+      // Fallback takeoff: AGL high (if nav not valid) — now gated on baseline_ok
+      if (!nav_ok && preflight_baseline_ok && !isnan(agl) && agl > TAKEOFF_ALT_FT) {
         if (!altHiStart_ms) altHiStart_ms = now;
         if (now - altHiStart_ms >= TAKEOFF_HOLD_MS) {
           g_state = ST_FLYING;
