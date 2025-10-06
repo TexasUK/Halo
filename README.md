@@ -1,4 +1,4 @@
-# HALO Strobe Controller (ESP32-S3) v0.4.0
+# HALO Strobe Controller (ESP32-S3) v0.4.3
 
 **HALO** is a compact ESP32-S3 flight/traffic companion with a TFT UI, audio prompts, and MOSFET-driven strobe control. It ingests FLARM/SoftRF NMEA over UART, renders a minimal UI, speaks traffic alerts, and adjusts strobe cadence by alert level. A small BLE control app lets you tweak settings and run a bench test sequence.
 
