@@ -28,13 +28,13 @@ STROBE       gate=6
 
 ### Boot & Pre-Flight
 - Splash screen, version card → Pre-Flight page
-- Boot chime after initialization completes
+- Boot chime after initialisation completes
 - Pre-Flight displays: Temperature (°C), QNH (hPa), Airfield Elevation (ft), Volume
 
 ### Cruise Mode
 - Compass tape with labels every 45°
 - Heading chevron
-- Bottom line: speed (kts) left, altitude (ft) right
+- Bottom line: Airspeed (kts) left, altitude (ft) right
 
 ![IMG_20250920_131533](https://github.com/user-attachments/assets/2753fdca-f0b5-4439-a155-b0a2bf2d5b2b)
 
@@ -48,8 +48,8 @@ STROBE       gate=6
 ![IMG_20250920_131542](https://github.com/user-attachments/assets/1359676f-4a7d-44f6-9b6b-8163bc064058)
 
 ### Landing / Landed
-- **Landing**: Large values for Speed (kts) and Altitude (ft)
-- **Landed**: Duration (HH:MM), UTC Time (HH:MM), Alerts (count)
+- **Landing**: Large values for Airspeed (kts) and Altitude (ft)
+- **Landed**: Duration (HH:MM), UTC Time (HH:MM), Flarm alerts in flight (count)
 
 ## Audio System (DFPlayer)
 
@@ -142,7 +142,7 @@ Halo controller app details soon to be released
 - ST7735 driver
 - BMP280 library  
 - ESP32 Arduino BLE stack
-- DFPlayer handled via project's `drivers/dfplayer.*`
+- DFPlayer
 
 ### Configuration
 - **Serial**: 115200 baud
