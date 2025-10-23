@@ -33,7 +33,7 @@ STROBE       gate=6
 ### Cruise Mode
 - Compass tape with labels every 45°
 - Heading chevron
-- Bottom line: speed (kts) left, altitude (ft) right
+- Bottom line: Airspeed (kts) left, QFE Altitude (ft) right
 
 ![IMG_20250920_131533](https://github.com/user-attachments/assets/2753fdca-f0b5-4439-a155-b0a2bf2d5b2b)
 
@@ -128,7 +128,7 @@ Connect via Serial at **115200 baud**:
 
 ## BLE Control Interface
 
-Halo controller app details soon to be released
+Halo controller app details soon to be released - currently in testing
 
 ## Build & Installation
 
