@@ -1,4 +1,4 @@
-# HALO Strobe Controller (ESP32-S3) v0.4.0
+# HALO Strobe Controller (ESP32-S3) v0.4.3
 
 **HALO** is a compact ESP32-S3 flight/traffic companion with a TFT UI, audio prompts, and MOSFET-driven strobe control. It ingests FLARM/SoftRF NMEA over UART, renders a minimal UI, speaks traffic alerts, and adjusts strobe cadence by alert level. A small BLE control app lets you tweak settings and run a bench test sequence.
 
@@ -11,7 +11,8 @@
 - **Navigation Input**: FLARM / SoftRF (UART RX)
 - **Lighting**: Strobe MOSFET (digital out)
 
-![IMG_20250920_131226](https://github.com/user-attachments/assets/839cd77a-67d7-476b-8b7b-fd425f63677d)
+![IMG_20251004_180623](https://github.com/user-attachments/assets/54284cbb-9e4b-423d-9233-fa50b9d9eec9)
+
 
 ### Pin Map (Current Build)
 
@@ -27,13 +28,13 @@ STROBE       gate=6
 
 ### Boot & Pre-Flight
 - Splash screen, version card → Pre-Flight page
-- Boot chime after initialization completes
+- Boot chime after initialisation completes
 - Pre-Flight displays: Temperature (°C), QNH (hPa), Airfield Elevation (ft), Volume
 
 ### Cruise Mode
 - Compass tape with labels every 45°
 - Heading chevron
-- Bottom line: Airspeed (kts) left, QFE Altitude (ft) right
+- Bottom line: speed (kts) left, altitude (ft) right
 
 ![IMG_20250920_131533](https://github.com/user-attachments/assets/2753fdca-f0b5-4439-a155-b0a2bf2d5b2b)
 
@@ -47,8 +48,8 @@ STROBE       gate=6
 ![IMG_20250920_131542](https://github.com/user-attachments/assets/1359676f-4a7d-44f6-9b6b-8163bc064058)
 
 ### Landing / Landed
-- **Landing**: Large values for Speed (kts) and Altitude (ft)
-- **Landed**: Duration (HH:MM), UTC Time (HH:MM), Alerts (count)
+- **Landing**: Large values for Airspeed (kts) and Altitude (ft)
+- **Landed**: Duration (HH:MM), UTC Time (HH:MM), Flarm alerts in flight (count)
 
 ## Audio System (DFPlayer)
 
@@ -141,7 +142,7 @@ Halo controller app details soon to be released - currently in testing
 - ST7735 driver
 - BMP280 library  
 - ESP32 Arduino BLE stack
-- DFPlayer handled via project's `drivers/dfplayer.*`
+- DFPlayer
 
 ### Configuration
 - **Serial**: 115200 baud
