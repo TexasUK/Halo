@@ -3,7 +3,7 @@
 #include <SPI.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_ST7735.h>
-#include <Adafruit_BMP280.h>
+#include <Adafruit_BMP3XX.h>
 #include <pgmspace.h>
 #include <ctype.h>
 #include <math.h>
@@ -44,7 +44,7 @@
 
 // ---------------- Devices ----------------
 Adafruit_ST7735 tft(TFT_CS, TFT_DC, TFT_RST);
-Adafruit_BMP280  bmp;
+Adafruit_BMP3XX  bmp;
 HardwareSerial   DFSerial(1);
 HardwareSerial   FLARM(2);
 
@@ -620,22 +620,35 @@ static void tele_init_defaults(){
 // ---------------- Sensors ----------------
 static void updateBMP(){
   if(!tele.bmp_ok) return;
-  float seaLevel = qnh_hPa;
 
-  float tC=bmp.readTemperature();
-  float pPa=bmp.readPressure();
-  if(!isnan(tC) && !isnan(pPa)){
-    tele.tC=tC; tele.p_hPa=pPa/100.0f; tele.alt_m=bmp.readAltitude(seaLevel);
+  // BMP388 needs a performReading() to update its internal data
+  if (!bmp.performReading()) return;
 
-    // Initial baseline capture was moved to boot auto-anchor logic.
+  tele.tC    = bmp.temperature;            // °C
+  tele.p_hPa = bmp.pressure / 100.0f;      // Pa -> hPa
+
+  // ISA baro altitude from QNH (hPa). QNH is your sea-level reference (qnh_hPa).
+  // h = 44330 * (1 - (P / P0)^(0.1903))
+  const float P   = tele.p_hPa;
+  const float P0  = qnh_hPa;               // e.g. 1013.25 or user-set via BLE
+  if (!isnan(P) && P > 0.0f && !isnan(P0) && P0 > 0.0f) {
+    tele.alt_m = 44330.0f * (1.0f - powf(P / P0, 0.1903f));
+  } else {
+    tele.alt_m = NAN;
   }
+
+  // Vertical speed estimate (same as before)
   uint32_t now=millis();
   static float lastAlt = NAN; static uint32_t lastAltT=0;
   if(!isnan(tele.alt_m)){
-    if(!isnan(lastAlt)){ float dt=(now-lastAltT)/1000.0f; if(dt>0.001f) tele.vs_ms=(tele.alt_m-lastAlt)/dt; }
+    if(!isnan(lastAlt)){
+      float dt=(now-lastAltT)/1000.0f;
+      if(dt>0.001f) tele.vs_ms=(tele.alt_m-lastAlt)/dt;
+    }
     lastAlt=tele.alt_m; lastAltT=now;
   }
 }
+
 
 // ---------------- App hooks for BLE persistence/hot-switch ----------------
 void halo_set_volume_runtime_and_persist(uint8_t vol0_30){
@@ -722,18 +735,24 @@ void setup(){
   tele_init_defaults();
   splash = SPLASH_START; splash_t=millis();
 
-  // I2C / BMP280
-  Wire.begin(I2C_SDA, I2C_SCL, 100000);
-  bool found=false; uint8_t addr=0x76;
-  for(uint8_t a:{(uint8_t)0x76,(uint8_t)0x77}){ Wire.beginTransmission(a); if(Wire.endTransmission()==0){ addr=a; found=true; break; } }
-  if(found && bmp.begin(addr)){
-    bmp.setSampling(Adafruit_BMP280::MODE_NORMAL,
-                    Adafruit_BMP280::SAMPLING_X8,
-                    Adafruit_BMP280::SAMPLING_X16,
-                    Adafruit_BMP280::FILTER_X16,
-                    Adafruit_BMP280::STANDBY_MS_63);
-    tele.bmp_ok=true;
-  }
+  // I2C / BMP388
+Wire.begin(I2C_SDA, I2C_SCL, 100000);
+bool found=false; uint8_t addr=0x76;
+for(uint8_t a : {(uint8_t)0x76,(uint8_t)0x77}) {
+  Wire.beginTransmission(a);
+  if (Wire.endTransmission() == 0) { addr=a; found=true; break; }
+}
+if (found && bmp.begin_I2C(addr)) {
+  // Oversampling / filter tuned for smooth AGL with low jitter
+  bmp.setTemperatureOversampling(BMP3_OVERSAMPLING_8X);
+  bmp.setPressureOversampling(BMP3_OVERSAMPLING_32X);
+  bmp.setIIRFilterCoeff(BMP3_IIR_FILTER_COEFF_7);
+  bmp.setOutputDataRate(BMP3_ODR_50_HZ);
+  tele.bmp_ok = true;
+} else {
+  tele.bmp_ok = false;
+}
+
 
   // Strobe GPIO
   pinMode(STROBE_PIN, OUTPUT); strobeApply(false); strobeSet(120,2000); strobeEnable(false);
