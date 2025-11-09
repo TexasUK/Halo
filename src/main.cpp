@@ -70,9 +70,12 @@ static bool     nav_autobaud_arm = false;
 static uint8_t  nav_last_idx     = 0;
 static uint32_t nav_switch_ms    = 0;
 
-// *** NEW *** — Boot baseline auto-anchoring gate
+// *** Boot baseline/QNH auto-calibration gates ***
 static bool     bootBaselineDone     = false;
 static uint32_t bootBaselineDeadline = 0;
+// NEW: boot QNH-from-field calibration gate
+static bool     bootQnhCalDone       = false;
+static uint32_t bootQnhCalDeadline   = 0;
 
 // ---------------- Backlight / Colors ----------------
 const int BL_CH=0, BL_FREQ=5000, BL_BITS=8;
@@ -617,6 +620,15 @@ static void tele_init_defaults(){
   tele.utc_hour = -1; tele.utc_min = -1;
 }
 
+// ---------------- Baro helpers ----------------
+// QNH from station pressure (hPa) at height h (m).
+// Inversion of h = 44330 * (1 - (P/P0)^0.1903)  =>  P0 = P / (1 - h/44330)^(1/0.1903)
+static inline float qnh_from_station(float P_hPa, float h_m){
+  const float denom = 1.0f - (h_m / 44330.0f);
+  if (denom <= 0.0f) return NAN;
+  return P_hPa / powf(denom, 5.255f);
+}
+
 // ---------------- Sensors ----------------
 static void updateBMP(){
   if(!tele.bmp_ok) return;
@@ -678,7 +690,7 @@ void halo_set_qnh_runtime_and_persist(uint16_t hpa){
     nvs_save_settings(g_cfg);
     Serial.printf("[QNH] baseline anchored to %.2fm (AGL stabilized)\n", baselineAlt_m);
 
-    // *** NEW *** arm AGL fallback takeoff after a ground QNH adjust
+    // arm AGL fallback takeoff after a ground QNH adjust
     app_preflight_mark_baseline_ok();
   }
 
@@ -736,23 +748,22 @@ void setup(){
   splash = SPLASH_START; splash_t=millis();
 
   // I2C / BMP388
-Wire.begin(I2C_SDA, I2C_SCL, 100000);
-bool found=false; uint8_t addr=0x76;
-for(uint8_t a : {(uint8_t)0x76,(uint8_t)0x77}) {
-  Wire.beginTransmission(a);
-  if (Wire.endTransmission() == 0) { addr=a; found=true; break; }
-}
-if (found && bmp.begin_I2C(addr)) {
-  // Oversampling / filter tuned for smooth AGL with low jitter
-  bmp.setTemperatureOversampling(BMP3_OVERSAMPLING_8X);
-  bmp.setPressureOversampling(BMP3_OVERSAMPLING_32X);
-  bmp.setIIRFilterCoeff(BMP3_IIR_FILTER_COEFF_7);
-  bmp.setOutputDataRate(BMP3_ODR_50_HZ);
-  tele.bmp_ok = true;
-} else {
-  tele.bmp_ok = false;
-}
-
+  Wire.begin(I2C_SDA, I2C_SCL, 100000);
+  bool found=false; uint8_t addr=0x76;
+  for(uint8_t a : {(uint8_t)0x76,(uint8_t)0x77}) {
+    Wire.beginTransmission(a);
+    if (Wire.endTransmission() == 0) { addr=a; found=true; break; }
+  }
+  if (found && bmp.begin_I2C(addr)) {
+    // Oversampling / filter tuned for smooth AGL with low jitter
+    bmp.setTemperatureOversampling(BMP3_OVERSAMPLING_8X);
+    bmp.setPressureOversampling(BMP3_OVERSAMPLING_32X);
+    bmp.setIIRFilterCoeff(BMP3_IIR_FILTER_COEFF_7);
+    bmp.setOutputDataRate(BMP3_ODR_50_HZ);
+    tele.bmp_ok = true;
+  } else {
+    tele.bmp_ok = false;
+  }
 
   // Strobe GPIO
   pinMode(STROBE_PIN, OUTPUT); strobeApply(false); strobeSet(120,2000); strobeEnable(false);
@@ -797,9 +808,11 @@ void loop(){
       trafLast = {false,0,NAN,NAN,NAN,0};
       bleInit();
 
-      // *** NEW *** schedule boot auto-anchor if nav is invalid initially
+      // Schedule ground auto-calibrations if nav invalid initially
       bootBaselineDone     = false;
-      bootBaselineDeadline = millis() + 10000; // ~10 s after init
+      bootBaselineDeadline = millis() + 10000; // ~10 s after init (plain anchor fallback)
+      bootQnhCalDone       = false;
+      bootQnhCalDeadline   = millis() + 5000;  // ~5 s after init (QNH-from-field preferred)
     }
     strobeTickSimple();
     dfp_tick();
@@ -810,21 +823,65 @@ void loop(){
   if(now-lastSensor>=250){ updateBMP(); lastSensor=now; }
   nav_tick();
 
-  // *** NEW *** Boot auto-anchoring of baseline (prevents false takeoff at power-up)
-  if (!bootBaselineDone && g_state == ST_PREFLIGHT) {
-    if ((int32_t)(now - bootBaselineDeadline) >= 0        // past delay
-        && !navValid()                                    // only when nav is invalid
-        && !isnan(tele.alt_m)
-        && (isnan(tele.sog_kts) || tele.sog_kts < 2.0f)   // not moving
-        && fabsf(tele.vs_ms) < 0.25f) {                   // fairly steady
+  // ---- Boot: auto-QNH from field elevation, then anchor AGL; else fallback to plain anchor ----
+  if (g_state == ST_PREFLIGHT && !navValid()) {
+    // Conditions for doing ground calibration/anchoring
+    bool stableGround = !isnan(tele.p_hPa) && !isnan(tele.vs_ms) &&
+                        (isnan(tele.sog_kts) || tele.sog_kts < 2.0f) &&
+                        fabsf(tele.vs_ms) < 0.25f;
+
+    // 4a) Prefer: compute QNH from known field elevation (if available) and re-anchor
+    if (!bootQnhCalDone &&
+        (int32_t)(now - bootQnhCalDeadline) >= 0 &&
+        stableGround &&
+        airfieldElev_ft > 0.0f) {
+
+      const float field_m = airfieldElev_ft * 0.3048f;
+      const float P0 = qnh_from_station(tele.p_hPa, field_m);
+
+      if (!isnan(P0) && P0 > 750.0f && P0 < 1100.0f) {   // sanity band for QNH
+        // Apply & persist QNH
+        qnh_hPa         = P0;
+        g_cfg.qnh_hPa   = qnh_hPa;
+        nvs_save_settings(g_cfg);
+
+        // Recompute altitude at the new QNH, then set baseline to zero AGL
+        updateBMP();
+        if (!isnan(tele.alt_m)) {
+          baselineAlt_m = tele.alt_m;
+          baselineSet   = true;
+          g_cfg.baselineAlt_m = baselineAlt_m;
+          g_cfg.baselineSet   = true;
+          nvs_save_settings(g_cfg);
+
+          // Arm AGL fallback takeoff & mark done
+          app_preflight_mark_baseline_ok();
+          bootQnhCalDone   = true;
+          bootBaselineDone = true;
+
+          Serial.printf("[QNH] auto-calibrated=%.1f hPa from field %.0fft; baseline=%.2fm (AGL zeroed)\n",
+                        qnh_hPa, airfieldElev_ft, baselineAlt_m);
+        }
+      } else {
+        // Out-of-range or bad pressure — fall back later to plain anchor path
+        bootQnhCalDone = true;  // prevent retry storm; rely on fallback below
+      }
+    }
+
+    // 4b) Fallback: if we didn't (or couldn't) auto-cal QNH, do a plain baseline anchor (old behavior)
+    if (!bootBaselineDone &&
+        (int32_t)(now - bootBaselineDeadline) >= 0 &&
+        stableGround &&
+        !isnan(tele.alt_m)) {
+
       baselineAlt_m = tele.alt_m;
       baselineSet   = true;
       g_cfg.baselineAlt_m = baselineAlt_m;
       g_cfg.baselineSet   = true;
       nvs_save_settings(g_cfg);
-      app_preflight_mark_baseline_ok();                   // arm fallback path
+      app_preflight_mark_baseline_ok();
       bootBaselineDone = true;
-      Serial.printf("[QNH] auto-anchored baseline at boot: %.2fm (AGL zeroed)\n", baselineAlt_m);
+      Serial.printf("[QNH] baseline anchored at boot: %.2fm (AGL zeroed; no field-cal QNH)\n", baselineAlt_m);
     }
   }
 
@@ -966,9 +1023,11 @@ void loop(){
         ui_set_page(PAGE_BOOT);
         navWasValid = false;   // so we’ll chime again when nav becomes valid next time
 
-        // *** NEW *** also reset auto-anchor so we can zero AGL again if needed
+        // also reset auto-cal/anchor so we can zero AGL again if needed
         bootBaselineDone     = false;
         bootBaselineDeadline = millis() + 10000;
+        bootQnhCalDone       = false;
+        bootQnhCalDeadline   = millis() + 5000;
       } break;
 
       default:
