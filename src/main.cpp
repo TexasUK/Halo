@@ -8,6 +8,7 @@
 #include <ctype.h>
 #include <math.h>
 
+#include "esp_system.h"
 #include "version.h"
 #include "splash_image.h"
 
@@ -123,6 +124,20 @@ static void strobeTickSimple(){
   uint32_t per = (stb.period_ms==0)?1:stb.period_ms;
   uint32_t phase=(now-strobe_zero_t)%per;
   strobeApply(phase<stb.on_ms);
+}
+
+// -----------Brownout logging------------
+static const char* reset_reason_str(esp_reset_reason_t r){
+  switch(r){
+    case ESP_RST_POWERON: return "POWERON";
+    case ESP_RST_EXT:     return "EXT";
+    case ESP_RST_SW:      return "SW";
+    case ESP_RST_PANIC:   return "PANIC";
+    case ESP_RST_INT_WDT: return "INT_WDT";
+    case ESP_RST_TASK_WDT:return "TASK_WDT";
+    case ESP_RST_BROWNOUT:return "BROWNOUT";
+    default:              return "OTHER";
+  }
 }
 
 // Nav-valid chime gating
@@ -267,12 +282,17 @@ static void updBoot(){
   const int y0 = 26;
   const int dy = 26;
   const int marginR = 6;
-  const int charW = 12;               // 6px base * size 2
+  const int charW = 12;
+
+  // Clear the entire values area to avoid leftover glyphs when right-aligning
+  tft.fillRect(64, y0-4, tft.width()-64-6, dy*4+10, COL_BG);
+
   bool ok = navValid();
   if (ok != boot_last_nav_ok){
     drawFlarmBadge(ok);
     boot_last_nav_ok = ok;
   }
+
   auto printRight = [&](const char* s, int y){
     int x = tft.width() - marginR - (int)strlen(s) * charW;
     if (x < 0) x = 0;
@@ -286,31 +306,26 @@ static void updBoot(){
   char buf[24];
   int y = y0;
 
-  // Temperature
-  if (tele.bmp_ok && !isnan(tele.tC)) {
-    snprintf(buf, sizeof(buf), "%dC", (int)lroundf(tele.tC));
-  } else {
-    snprintf(buf, sizeof(buf), "--C");
-  }
+  // Temp
+  if (tele.bmp_ok && !isnan(tele.tC)) snprintf(buf, sizeof(buf), "%dC", (int)lroundf(tele.tC));
+  else                                snprintf(buf, sizeof(buf), "--C");
   printRight(buf, y); y += dy;
 
   // QNH
   snprintf(buf, sizeof(buf), "%dhPa", (int)lroundf(qnh_hPa));
   printRight(buf, y); y += dy;
 
-  // Airfield elevation
+  // Elevation
   snprintf(buf, sizeof(buf), "%dft", (int)lroundf(airfieldElev_ft));
   printRight(buf, y); y += dy;
 
-  // Volume display 0..10
-  {
-    int vol10 = (int)lroundf(df_volume / 3.0f);
-    if (vol10 < 0) vol10 = 0;
-    if (vol10 > 10) vol10 = 10;
-    snprintf(buf, sizeof(buf), "%d", vol10);
-  }
+  // Volume 0..10
+  int vol10 = (int)lroundf(df_volume / 3.0f);
+  if (vol10 < 0) vol10 = 0; if (vol10 > 10) vol10 = 10;
+  snprintf(buf, sizeof(buf), "%d", vol10);
   printRight(buf, y);
 }
+
 
 // ---------------- Compass helpers ----------------
 static int norm360(int a){ a%=360; if(a<0) a+=360; return a; }
@@ -693,6 +708,8 @@ void halo_apply_nav_baud(uint32_t baud){
 // ---------------- Setup / Loop ----------------
 void setup(){
   Serial.begin(115200);
+  esp_reset_reason_t rr = esp_reset_reason();
+  Serial.printf("[BOOT] reset reason: %d (%s)\n", (int)rr, reset_reason_str(rr));
   uint32_t t0=millis(); while(!Serial && millis()-t0<1000){ delay(10); }
 
   // Display / backlight
