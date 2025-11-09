@@ -20,8 +20,10 @@
 #include "drivers/dfplayer.h"
 #include "nav/flarm.h"
 #include "storage/nvs_store.h"
+#include "ble/ble_ctrl.h"
 
-#include "ble/ble_ctrl.h"   // BLE control plane + app hooks declarations
+// NEW: GPS-only wind + airspeed estimator
+#include "nav/wind_estimator.h"
 
 // ---------------- Pins ----------------
 #define I2C_SDA   4
@@ -47,6 +49,9 @@ Adafruit_ST7735 tft(TFT_CS, TFT_DC, TFT_RST);
 Adafruit_BMP3XX  bmp;
 HardwareSerial   DFSerial(1);
 HardwareSerial   FLARM(2);
+
+// NEW: wind estimator instance
+static WindEstimator g_wind;
 
 // --- DFPlayer raw command helpers (no re-init needed) ---
 static void df_send_cmd(uint8_t cmd, uint16_t param) {
@@ -108,9 +113,6 @@ uint8_t df_volume       = 24;
 bool  baselineSet   = false;
 float baselineAlt_m = NAN;
 
-// Extern for baro math
-float seaLevel_hPa = 1013.25f;
-
 // Plays track 2 once when nav becomes valid
 static bool navWasValid = false;
 
@@ -129,7 +131,7 @@ static void strobeTickSimple(){
   strobeApply(phase<stb.on_ms);
 }
 
-// -----------Brownout logging------------
+// -----------Reset reason------------
 static const char* reset_reason_str(esp_reset_reason_t r){
   switch(r){
     case ESP_RST_POWERON: return "POWERON";
@@ -143,7 +145,7 @@ static const char* reset_reason_str(esp_reset_reason_t r){
   }
 }
 
-// Nav-valid chime gating
+// Debounced nav-valid chime gating
 static uint32_t lastNavChime_ms = 0;
 static const uint32_t NAV_VALID_CONFIRM_MS   = 1500;  // must be valid this long before chime
 static const uint32_t NAV_REARM_INVALID_MS   = 9000;  // must be invalid this long to rearm
@@ -275,7 +277,7 @@ static void drawBootStatic(){
   int y = y0;
   tft.setCursor(xLabel,y); tft.print(F("Temp"));    y += dy;
   tft.setCursor(xLabel,y); tft.print(F("QNH"));     y += dy;
-  tft.setCursor(xLabel,y); tft.print(F("FElev"));  y += dy;
+  tft.setCursor(xLabel,y); tft.print(F("FElev"));   y += dy;
   tft.setCursor(xLabel,y); tft.print(F("Vol"));
 
   tft.fillRect(xValueLeft, y0-4, tft.width()-xValueLeft-6, dy*4+10, COL_BG);
@@ -328,7 +330,6 @@ static void updBoot(){
   snprintf(buf, sizeof(buf), "%d", vol10);
   printRight(buf, y);
 }
-
 
 // ---------------- Compass helpers ----------------
 static int norm360(int a){ a%=360; if(a<0) a+=360; return a; }
@@ -390,20 +391,55 @@ static void drawCompassTape(float heading_deg){
   int16_t y = tft.getCursorY();
   tft.fillCircle(x + 2, y - 6, 2, COL_FG);
 }
+
 static void drawCruiseStatic(){
   tft.fillScreen(COL_BG);
   drawHeaderStrip(F("Cruise"));
   drawHeaderBadges(navValid());
-  float hdg = (isnan(tele.track_deg)? 0.f : tele.track_deg); drawCompassTape(hdg);
+  float hdg = (isnan(tele.track_deg)? 0.f : tele.track_deg);
+  drawCompassTape(hdg);
 }
+
 static void updCruise(){
   drawHeaderBadges(navValid());
-  float hdg=(isnan(tele.track_deg)?0.f:tele.track_deg); drawCompassTape(hdg);
-  const int yText=tft.height()-22; tft.setTextColor(COL_FG, COL_BG); tft.setTextSize(2);
+  float hdg=(isnan(tele.track_deg)?0.f:tele.track_deg);
+  drawCompassTape(hdg);
+
+  const int yText=tft.height()-22;
+  tft.setTextColor(COL_FG, COL_BG);
+  tft.setTextSize(2);
   tft.setCursor(6,yText);
-  if(!isnan(tele.sog_kts)){ int skts=(int)lroundf(tele.sog_kts); tft.print(skts); tft.print("kts"); } else tft.print("---kts");
-  char buf[16]; if(!isnan(tele.alt_m)){ int ft=(int)lroundf(tele.alt_m*3.28084f); snprintf(buf,sizeof(buf),"%dft",ft); } else snprintf(buf,sizeof(buf),"---ft");
-  int tw=strlen(buf)*12; tft.setCursor(tft.width()-6-tw,yText); tft.print(buf);
+
+  // Show AS est when wind is valid, else fall back to GS
+  bool haveAS = g_wind.windValid(millis()) && !isnan(tele.sog_kts) && !isnan(tele.track_deg);
+  if (haveAS) {
+    float as_kts = g_wind.getAirspeedEstimate(tele.sog_kts, tele.track_deg);
+    if (!isnan(as_kts)) {
+      int aikts = (int)lroundf(as_kts);
+      tft.print("AS "); tft.print(aikts); tft.print("kts");
+    } else {
+      int skts=(int)lroundf(tele.sog_kts);
+      tft.print("GS "); tft.print(skts); tft.print("kts");
+    }
+  } else {
+    if(!isnan(tele.sog_kts)){
+      int skts=(int)lroundf(tele.sog_kts);
+      tft.print("GS "); tft.print(skts); tft.print("kts");
+    } else {
+      tft.print("---kts");
+    }
+  }
+
+  char buf[16];
+  if(!isnan(tele.alt_m)){
+    int ft=(int)lroundf(tele.alt_m*3.28084f);
+    snprintf(buf,sizeof(buf),"%dft",ft);
+  } else {
+    snprintf(buf,sizeof(buf),"---ft");
+  }
+  int tw=strlen(buf)*12;
+  tft.setCursor(tft.width()-6-tw,yText);
+  tft.print(buf);
 }
 
 // ---------------- Traffic (bearing number removed) ----------------
@@ -495,7 +531,7 @@ static void renderTrafficDynamic(bool force){
     tft.setCursor(x_v, 18);
     tft.print(vbuf);
 
-    // Right-hand bearing numeric removed by request; arrow remains the visual indicator.
+    // Right-hand bearing numeric removed; arrow shows direction.
   }
 
   uint16_t tint = COL_BG;
@@ -649,7 +685,7 @@ static void updateBMP(){
     tele.alt_m = NAN;
   }
 
-  // Vertical speed estimate (same as before)
+  // Vertical speed estimate
   uint32_t now=millis();
   static float lastAlt = NAN; static uint32_t lastAltT=0;
   if(!isnan(tele.alt_m)){
@@ -660,7 +696,6 @@ static void updateBMP(){
     lastAlt=tele.alt_m; lastAltT=now;
   }
 }
-
 
 // ---------------- App hooks for BLE persistence/hot-switch ----------------
 void halo_set_volume_runtime_and_persist(uint8_t vol0_30){
@@ -693,8 +728,6 @@ void halo_set_qnh_runtime_and_persist(uint16_t hpa){
     // arm AGL fallback takeoff after a ground QNH adjust
     app_preflight_mark_baseline_ok();
   }
-
-  // UI will pick up qnh_hPa on the next BOOT tick
 }
 void halo_set_elev_runtime_and_persist(uint16_t feet){
   airfieldElev_ft = (float)feet;
@@ -723,7 +756,6 @@ void halo_set_datasource_and_baud(bool isSoftRF, uint8_t baudIndex){
   Serial.printf("[NAV] source=%s, baud=%lu (flushed; awaiting fresh NMEA)\n",
                 isSoftRF ? "SoftRF" : "FLARM", (unsigned long)baud);
 }
-
 void halo_apply_nav_baud(uint32_t baud){
   g_nav_baud = baud;
   nav_begin(FLARM, FLARM_RX_PIN, g_nav_baud); // re-open Serial2 at new baud
@@ -823,6 +855,11 @@ void loop(){
   if(now-lastSensor>=250){ updateBMP(); lastSensor=now; }
   nav_tick();
 
+  // Feed wind estimator when GPS is sane
+  if (navValid() && !isnan(tele.sog_kts) && !isnan(tele.track_deg)) {
+    g_wind.update(now, tele.sog_kts, tele.track_deg);
+  }
+
   // ---- Boot: auto-QNH from field elevation, then anchor AGL; else fallback to plain anchor ----
   if (g_state == ST_PREFLIGHT && !navValid()) {
     // Conditions for doing ground calibration/anchoring
@@ -830,7 +867,7 @@ void loop(){
                         (isnan(tele.sog_kts) || tele.sog_kts < 2.0f) &&
                         fabsf(tele.vs_ms) < 0.25f;
 
-    // 4a) Prefer: compute QNH from known field elevation (if available) and re-anchor
+    // Prefer: compute QNH from known field elevation and re-anchor
     if (!bootQnhCalDone &&
         (int32_t)(now - bootQnhCalDeadline) >= 0 &&
         stableGround &&
@@ -839,13 +876,11 @@ void loop(){
       const float field_m = airfieldElev_ft * 0.3048f;
       const float P0 = qnh_from_station(tele.p_hPa, field_m);
 
-      if (!isnan(P0) && P0 > 750.0f && P0 < 1100.0f) {   // sanity band for QNH
-        // Apply & persist QNH
+      if (!isnan(P0) && P0 > 750.0f && P0 < 1100.0f) {
         qnh_hPa         = P0;
         g_cfg.qnh_hPa   = qnh_hPa;
         nvs_save_settings(g_cfg);
 
-        // Recompute altitude at the new QNH, then set baseline to zero AGL
         updateBMP();
         if (!isnan(tele.alt_m)) {
           baselineAlt_m = tele.alt_m;
@@ -854,7 +889,6 @@ void loop(){
           g_cfg.baselineSet   = true;
           nvs_save_settings(g_cfg);
 
-          // Arm AGL fallback takeoff & mark done
           app_preflight_mark_baseline_ok();
           bootQnhCalDone   = true;
           bootBaselineDone = true;
@@ -863,12 +897,12 @@ void loop(){
                         qnh_hPa, airfieldElev_ft, baselineAlt_m);
         }
       } else {
-        // Out-of-range or bad pressure — fall back later to plain anchor path
-        bootQnhCalDone = true;  // prevent retry storm; rely on fallback below
+        // out-of-range; allow fallback below
+        bootQnhCalDone = true;
       }
     }
 
-    // 4b) Fallback: if we didn't (or couldn't) auto-cal QNH, do a plain baseline anchor (old behavior)
+    // Fallback: plain baseline anchor (old behavior)
     if (!bootBaselineDone &&
         (int32_t)(now - bootBaselineDeadline) >= 0 &&
         stableGround &&
