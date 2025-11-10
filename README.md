@@ -6,7 +6,7 @@
 
 - **MCU**: ESP32-S3 (tested on LOLIN S3 Mini / esp32-s3-zero)
 - **Display**: ST7735 160×128 TFT (SPI)
-- **Barometer**: BMP280 (I²C)
+- **Barometer**: BMP388 (I²C)
 - **Audio**: DFPlayer Mini (TX only + BUSY)
 - **Navigation Input**: FLARM / SoftRF (UART RX)
 - **Lighting**: Strobe MOSFET (digital out)
